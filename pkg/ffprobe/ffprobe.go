@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"lukechampine.com/blake3"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -846,8 +847,9 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// HashFileFast вычисляет быстрый хеш файла (на базе BLAKE3) с параллельным чтением.
-// workers - количество параллельных горутин (0 = число CPU).
+// HashFileFast вычисляет быстрый 256-битный хеш файла на базе BLAKE3.
+// workers - количество параллельных горутин чтения (0 = по числу CPU).
+// progressInterval - интервал вывода прогресса (0 = без вывода).
 func HashFileFast(path string, workers int, progressInterval time.Duration) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -861,26 +863,23 @@ func HashFileFast(path string, workers int, progressInterval time.Duration) (str
 	}
 	totalSize := fi.Size()
 	if totalSize == 0 {
-		hash := blake3.Sum256(nil)
-		return fmt.Sprintf("%x", hash), nil
+		return fmt.Sprintf("%x", blake3.Sum256(nil)), nil
 	}
 
 	if workers <= 0 {
-		workers = 4 // можно runtime.NumCPU()
+		workers = 4 // runtime.NumCPU() для автоматического подбора
 	}
 
-	// Размер блока для одной горутины (чем больше, тем меньше накладных расходов)
 	blockSize := int64(16 * 1024 * 1024) // 16 МБ
 	numBlocks := (totalSize + blockSize - 1) / blockSize
 
-	// Канал задач
 	type job struct {
 		index  int64
 		offset int64
 		size   int64
 	}
 	jobs := make(chan job, numBlocks)
-	results := make([]blake3.Hash, numBlocks)
+	results := make([][32]byte, numBlocks) // [32]byte = blake3.Sum256
 
 	// Прогресс
 	var bytesRead int64
@@ -888,52 +887,10 @@ func HashFileFast(path string, workers int, progressInterval time.Duration) (str
 	defer func() { close(done); time.Sleep(50 * time.Millisecond) }()
 
 	if progressInterval > 0 {
-		go func() {
-			ticker := time.NewTicker(progressInterval)
-			defer ticker.Stop()
-			start := time.Now()
-			lastBytes := int64(0)
-			lastTime := start
-			first := true
-			for {
-				select {
-				case <-done:
-					read := atomic.LoadInt64(&bytesRead)
-					elapsed := time.Since(start)
-					percent := float64(read) / float64(totalSize) * 100
-					speed := float64(read) / elapsed.Seconds() / 1_000_000
-					fmt.Printf("\rГотово: %.2f%% (%.2f МБ/с) за %v\n", percent, speed, formatDuration(elapsed))
-					return
-				case <-ticker.C:
-					read := atomic.LoadInt64(&bytesRead)
-					now := time.Now()
-					percent := float64(read) / float64(totalSize) * 100
-					if first {
-						first = false
-						lastBytes = read
-						lastTime = now
-						fmt.Printf("\rПрогресс: %.2f%% (инициализация...)   ", percent)
-						continue
-					}
-					intervalBytes := read - lastBytes
-					intervalTime := now.Sub(lastTime).Seconds()
-					if intervalBytes > 0 && intervalTime > 0 {
-						speed := float64(intervalBytes) / intervalTime / 1_000_000
-						remaining := totalSize - read
-						eta := time.Duration(float64(remaining) / (float64(intervalBytes) / intervalTime))
-						fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с), осталось %v   ",
-							percent, speed, formatDuration(eta))
-					} else {
-						fmt.Printf("\rПрогресс: %.2f%% (ожидание...)   ", percent)
-					}
-					lastBytes = read
-					lastTime = now
-				}
-			}
-		}()
+		go progressReporter(done, &bytesRead, totalSize, progressInterval)
 	}
 
-	// Заполняем очередь
+	// Генерируем задания
 	go func() {
 		for i := int64(0); i < numBlocks; i++ {
 			off := i * blockSize
@@ -946,33 +903,86 @@ func HashFileFast(path string, workers int, progressInterval time.Duration) (str
 		close(jobs)
 	}()
 
-	// Воркеры
+	// Пул воркеров
 	var wg sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
+
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			buf := make([]byte, blockSize) // переиспользуется внутри горутины
+			buf := make([]byte, blockSize)
 			for j := range jobs {
 				n, err := f.ReadAt(buf[:j.size], j.offset)
 				if err != nil && !(errors.Is(err, io.EOF) && int64(n) == j.size) {
-					// ошибка (пропускаем, но в реальном коде лучше собирать ошибки)
-					continue
+					errOnce.Do(func() { firstErr = err })
+					return
 				}
-				// Считаем хеш блока
-				sum := blake3.Sum256(buf[:j.size])
-				results[j.index] = sum
+				// Прямой вызов Sum256 – не нужен отдельный hasher
+				results[j.index] = blake3.Sum256(buf[:j.size])
 				atomic.AddInt64(&bytesRead, j.size)
 			}
 		}()
 	}
 	wg.Wait()
 
-	// Сборка корневого хеша: конкатенируем все блочные хеши и ещё раз хешируем
-	hasher := blake3.New()
-	for _, h := range results {
-		hasher.Write(h[:])
+	if firstErr != nil {
+		return "", fmt.Errorf("ошибка чтения: %w", firstErr)
 	}
-	rootHash := hasher.Sum(nil)
+
+	// Собираем корневой хеш: конкатенируем блочные хеши и ещё раз Sum256
+	var concat []byte
+	for _, h := range results {
+		concat = append(concat, h[:]...)
+	}
+	rootHash := blake3.Sum256(concat)
 	return fmt.Sprintf("%x", rootHash), nil
+}
+
+// Вспомогательная горутина прогресса (вынесена для читаемости)
+func progressReporter(done <-chan struct{}, bytesRead *int64, totalSize int64, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	start := time.Now()
+	lastBytes := int64(0)
+	lastTime := start
+	first := true
+
+	for {
+		select {
+		case <-done:
+			read := atomic.LoadInt64(bytesRead)
+			elapsed := time.Since(start)
+			percent := float64(read) / float64(totalSize) * 100
+			speed := float64(read) / elapsed.Seconds() / 1_000_000
+			fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с) — завершено за %v\n",
+				percent, speed, formatDuration(elapsed))
+			return
+		case <-ticker.C:
+			read := atomic.LoadInt64(bytesRead)
+			now := time.Now()
+			percent := float64(read) / float64(totalSize) * 100
+			if first {
+				first = false
+				lastBytes = read
+				lastTime = now
+				fmt.Printf("\rПрогресс: %.2f%% (инициализация...)   ", percent)
+				continue
+			}
+			intervalBytes := read - lastBytes
+			intervalTime := now.Sub(lastTime).Seconds()
+			if intervalBytes > 0 && intervalTime > 0 {
+				speed := float64(intervalBytes) / intervalTime / 1_000_000
+				remaining := totalSize - read
+				eta := time.Duration(float64(remaining) / (float64(intervalBytes) / intervalTime))
+				fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с), осталось %v   ",
+					percent, speed, formatDuration(eta))
+			} else {
+				fmt.Printf("\rПрогресс: %.2f%% (ожидание данных...)   ", percent)
+			}
+			lastBytes = read
+			lastTime = now
+		}
+	}
 }
