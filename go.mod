@@ -4,8 +4,10 @@ go 1.26.1
 
 require (
 	github.com/Galdoba/appcontext v0.0.0-20260422164318-e9677748cb4c
-	github.com/Galdoba/molog v0.0.0-20260406084735-30080c3d02e6
+	lukechampine.com/blake3 v1.4.1
 )
+
+require github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 
 require (
 	github.com/goccy/go-yaml v1.18.0 // indirect
