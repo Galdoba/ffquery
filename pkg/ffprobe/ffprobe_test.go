@@ -8,10 +8,16 @@ import (
 )
 
 func TestRawData_ToMedia(t *testing.T) {
-	raw, err := ffprobe.NewRawData(`\\192.168.31.4\root\IN\_AMEDIA\_DONE\Adskiy_ray_s01\Adskiy_ray_s01e09_PRT260108000659_SER_08191_18.mp4`)
+	raw, err := ffprobe.NewRawData(`\\192.168.31.4\buffer\IN\_DONE\Grab_nagrablennoe_iskuplenie_s02e01_PRT260522003403_0.4.4_SER_08869_18.mp4`)
 	fmt.Println(err)
-	m, err := raw.ToMedia()
+	// m, err := raw.ToMedia()
+	// fmt.Println(err)
+	// fmt.Println(m)
+	fmt.Println(raw.Render())
+	raw, err = ffprobe.NewRawData(`\\192.168.31.4\buffer\IN\_DONE\Grab_nagrablennoe_iskuplenie_s02e02_PRT260522004758_0.4.4_SER_08870_18.mp4`)
 	fmt.Println(err)
-	fmt.Println(m)
-	fmt.Println(m.Render(ffprobe.FieldWidth, ffprobe.FieldHeight, ffprobe.FieldLanguage, ffprobe.FieldAvgFrameRate, ffprobe.FieldBitRate, ffprobe.FieldCodec, ffprobe.FieldChannelLayout, ffprobe.FieldName))
+	// m, err := raw.ToMedia()
+	// fmt.Println(err)
+	// fmt.Println(m)
+	fmt.Println(raw.Render())
 }
