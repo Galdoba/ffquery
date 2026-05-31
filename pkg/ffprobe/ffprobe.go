@@ -2,22 +2,14 @@ package ffprobe
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"lukechampine.com/blake3"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -395,13 +387,13 @@ type streamWithTypeIndex struct {
 // ---------------------------------------------------------------------------
 
 // NewRawData creates a new RawData by running ffprobe on the given file path.
-func NewRawData(path string) (*RawData, error) {
+func NewRawData(path string) (RawData, error) {
 	ffprobePath, err := exec.LookPath(ffprobeCmd)
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe not found: %w", err)
+		return RawData{}, fmt.Errorf("ffprobe not found: %w", err)
 	}
 	if _, err := os.OpenFile(path, os.O_RDONLY, 0666); err != nil {
-		return nil, fmt.Errorf("cannot read file %q: %w", path, err)
+		return RawData{}, fmt.Errorf("cannot read file %q: %w", path, err)
 	}
 
 	cmd := exec.Command(ffprobePath, append(ffprobeScanArgs, path)...)
@@ -411,17 +403,17 @@ func NewRawData(path string) (*RawData, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffprobe %w\n%s", err, stdout.String())
+		return RawData{}, fmt.Errorf("ffprobe %w\n%s", err, stdout.String())
 	}
 
 	var result RawData
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse RawData: %w\nraw output: %s", err, stdout.String())
+		return RawData{}, fmt.Errorf("failed to parse RawData: %w\nraw output: %s", err, stdout.String())
 	}
 
 	result.source = path
 
-	return &result, nil
+	return result, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +425,7 @@ func NewRawData(path string) (*RawData, error) {
 // should be included. If no keys are provided, all non-zero fields are rendered.
 // Top-level categories (Video, Audio, etc.) are only shown if they are
 // explicitly requested or if at least one of their fields is requested.
-func (rd *RawData) Render(keys ...string) string {
+func (rd RawData) Render(keys ...string) string {
 	var b strings.Builder
 	filter := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -729,260 +721,4 @@ func dispsitionToString(disp map[string]int) string {
 		}
 	}
 	return s.String()
-}
-
-// HashFileWithProgress вычисляет SHA-256 хеш файла с прогресс-баром.
-// progressInterval – интервал обновления вывода (рекомендуется 5-10 сек для больших файлов).
-func HashFileWithProgress(path string, progressInterval time.Duration) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("не удалось открыть файл: %w", err)
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("стат файла: %w", err)
-	}
-	totalSize := fi.Size()
-	if totalSize == 0 {
-		hash := sha256.Sum256(nil)
-		return hex.EncodeToString(hash[:]), nil
-	}
-
-	var bytesRead int64
-	done := make(chan struct{})
-	defer func() {
-		close(done)
-		time.Sleep(50 * time.Millisecond)
-	}()
-
-	// Прогресс-горутина
-	if progressInterval > 0 {
-		go func() {
-			ticker := time.NewTicker(progressInterval)
-			defer ticker.Stop()
-
-			start := time.Now()
-			lastBytes := int64(0)
-			lastTime := start
-			first := true
-
-			for {
-				select {
-				case <-done:
-					read := atomic.LoadInt64(&bytesRead)
-					elapsed := time.Since(start)
-					percent := float64(read) / float64(totalSize) * 100
-					speed := float64(read) / elapsed.Seconds() / 1_000_000
-					fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с) — завершено за %v\n",
-						percent, speed, formatDuration(elapsed))
-					return
-				case <-ticker.C:
-					read := atomic.LoadInt64(&bytesRead)
-					now := time.Now()
-					percent := float64(read) / float64(totalSize) * 100
-
-					// Пропускаем первый тик, если данных мало
-					if first {
-						first = false
-						lastBytes = read
-						lastTime = now
-						fmt.Printf("\rПрогресс: %.2f%% (инициализация...)   ", percent)
-						continue
-					}
-
-					intervalBytes := read - lastBytes
-					intervalTime := now.Sub(lastTime).Seconds()
-					if intervalBytes > 0 && intervalTime > 0 {
-						speed := float64(intervalBytes) / intervalTime / 1_000_000
-						remaining := totalSize - read
-						eta := time.Duration(float64(remaining) / (float64(intervalBytes) / intervalTime))
-						fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с), осталось %v   ",
-							percent, speed, formatDuration(eta))
-					} else {
-						fmt.Printf("\rПрогресс: %.2f%% (ожидание данных...)   ", percent)
-					}
-
-					lastBytes = read
-					lastTime = now
-				}
-			}
-		}()
-	}
-
-	// Хеширование с большим буфером (4 МБ)
-	hasher := sha256.New()
-	buf := make([]byte, 4*1024*1024) // 4 MB
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			hasher.Write(buf[:n])
-			atomic.AddInt64(&bytesRead, int64(n))
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", fmt.Errorf("ошибка чтения: %w", err)
-		}
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
-}
-
-func formatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-
-	if h > 0 {
-		return fmt.Sprintf("%dh%dm%ds", h, m, s)
-	} else if m > 0 {
-		return fmt.Sprintf("%dm%ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
-}
-
-// HashFileFast вычисляет быстрый 256-битный хеш файла на базе BLAKE3.
-// workers - количество параллельных горутин чтения (0 = по числу CPU).
-// progressInterval - интервал вывода прогресса (0 = без вывода).
-func HashFileFast(path string, workers int, progressInterval time.Duration) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("открытие файла: %w", err)
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("стат файла: %w", err)
-	}
-	totalSize := fi.Size()
-	if totalSize == 0 {
-		return fmt.Sprintf("%x", blake3.Sum256(nil)), nil
-	}
-
-	if workers <= 0 {
-		workers = 4 // runtime.NumCPU() для автоматического подбора
-	}
-
-	blockSize := int64(16 * 1024 * 1024) // 16 МБ
-	numBlocks := (totalSize + blockSize - 1) / blockSize
-
-	type job struct {
-		index  int64
-		offset int64
-		size   int64
-	}
-	jobs := make(chan job, numBlocks)
-	results := make([][32]byte, numBlocks) // [32]byte = blake3.Sum256
-
-	// Прогресс
-	var bytesRead int64
-	done := make(chan struct{})
-	defer func() { close(done); time.Sleep(50 * time.Millisecond) }()
-
-	if progressInterval > 0 {
-		go progressReporter(done, &bytesRead, totalSize, progressInterval)
-	}
-
-	// Генерируем задания
-	go func() {
-		for i := int64(0); i < numBlocks; i++ {
-			off := i * blockSize
-			size := blockSize
-			if off+size > totalSize {
-				size = totalSize - off
-			}
-			jobs <- job{index: i, offset: off, size: size}
-		}
-		close(jobs)
-	}()
-
-	// Пул воркеров
-	var wg sync.WaitGroup
-	var firstErr error
-	var errOnce sync.Once
-
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, blockSize)
-			for j := range jobs {
-				n, err := f.ReadAt(buf[:j.size], j.offset)
-				if err != nil && !(errors.Is(err, io.EOF) && int64(n) == j.size) {
-					errOnce.Do(func() { firstErr = err })
-					return
-				}
-				// Прямой вызов Sum256 – не нужен отдельный hasher
-				results[j.index] = blake3.Sum256(buf[:j.size])
-				atomic.AddInt64(&bytesRead, j.size)
-			}
-		}()
-	}
-	wg.Wait()
-
-	if firstErr != nil {
-		return "", fmt.Errorf("ошибка чтения: %w", firstErr)
-	}
-
-	// Собираем корневой хеш: конкатенируем блочные хеши и ещё раз Sum256
-	var concat []byte
-	for _, h := range results {
-		concat = append(concat, h[:]...)
-	}
-	rootHash := blake3.Sum256(concat)
-	return fmt.Sprintf("%x", rootHash), nil
-}
-
-// Вспомогательная горутина прогресса (вынесена для читаемости)
-func progressReporter(done <-chan struct{}, bytesRead *int64, totalSize int64, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	start := time.Now()
-	lastBytes := int64(0)
-	lastTime := start
-	first := true
-
-	for {
-		select {
-		case <-done:
-			read := atomic.LoadInt64(bytesRead)
-			elapsed := time.Since(start)
-			percent := float64(read) / float64(totalSize) * 100
-			speed := float64(read) / elapsed.Seconds() / 1_000_000
-			fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с) — завершено за %v\n",
-				percent, speed, formatDuration(elapsed))
-			return
-		case <-ticker.C:
-			read := atomic.LoadInt64(bytesRead)
-			now := time.Now()
-			percent := float64(read) / float64(totalSize) * 100
-			if first {
-				first = false
-				lastBytes = read
-				lastTime = now
-				fmt.Printf("\rПрогресс: %.2f%% (инициализация...)   ", percent)
-				continue
-			}
-			intervalBytes := read - lastBytes
-			intervalTime := now.Sub(lastTime).Seconds()
-			if intervalBytes > 0 && intervalTime > 0 {
-				speed := float64(intervalBytes) / intervalTime / 1_000_000
-				remaining := totalSize - read
-				eta := time.Duration(float64(remaining) / (float64(intervalBytes) / intervalTime))
-				fmt.Printf("\rПрогресс: %.2f%% (%.2f МБ/с), осталось %v   ",
-					percent, speed, formatDuration(eta))
-			} else {
-				fmt.Printf("\rПрогресс: %.2f%% (ожидание данных...)   ", percent)
-			}
-			lastBytes = read
-			lastTime = now
-		}
-	}
 }
