@@ -2,378 +2,191 @@ package mediagroup
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
-	"io"
-	"log"
-	"math"
+	"os"
 	"os/exec"
-	"runtime"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/Galdoba/ffquery/pkg/ffprobe"
 )
 
-// ScanAudioRaw returns an exec.Cmd configured to run a single ffmpeg pass that
-// outputs all RMS and LUFS metadata (mix & per‑channel, interval & overall)
-// for the requested audio streams to stdout.
-//
-// Each measurement block is tagged:
-//   - rms_int        interval RMS (40 ms blocks)
-//   - rms_ovr        overall RMS (accumulated)
-//   - mix_lufs       integrated / short‑term LUFS of the whole mix
-//   - chX_lufs       integrated / short‑term LUFS of channel X (X = 1,2,…)
-//
-// The caller should start the command, read its stdout line by line, and
-// dispatch the parsed values using the tags.
-func (m *Media) ScanAudioRaw(indexes ...int) (*exec.Cmd, error) {
-	if m.Raw.Format == nil || m.Raw.Format.Filename == "" {
-		return nil, fmt.Errorf("no input file information")
+const (
+	minimalIntervalSamples        = 200
+	defaultIntervalDurationFactor = 10
+)
+
+func (m *Media) ScanRmsLevels(audio ...int) error {
+	// строим команду
+	asi, err := m.collectAudioStreamInfo(audio...)
+	if err != nil {
+		return fmt.Errorf("failed to collect audio stream info: %w", err)
 	}
-
-	// Collect all audio streams (global index + audio‑index)
-	type audInfo struct {
-		globalIndex int
-		audioIndex  int
-		stream      ffprobe.Stream
+	cmd, paths, err := generateLoudnessStatsScanCommand(m.Path, asi, filepath.Dir(m.Path))
+	fmt.Println(cmd)
+	for k, v := range paths {
+		fmt.Println("===")
+		fmt.Println(k, ":", v)
 	}
-	var allAudio []audInfo
-	for _, s := range m.Raw.Streams {
-		if s.CodecType == ffprobe.StreamTypeAudio {
-			allAudio = append(allAudio, audInfo{
-				globalIndex: s.Index,
-				audioIndex:  len(allAudio),
-				stream:      s,
-			})
-		}
-	}
-	if len(allAudio) == 0 {
-		return nil, fmt.Errorf("no audio streams found")
-	}
-
-	// If no indexes given, scan all audio streams
-	if len(indexes) == 0 {
-		indexes = make([]int, len(allAudio))
-		for i, a := range allAudio {
-			indexes[i] = a.globalIndex
-		}
-	}
-
-	// Build the list of streams to process
-	var toScan []audInfo
-	for _, idx := range indexes {
-		found := false
-		for _, a := range allAudio {
-			if a.globalIndex == idx {
-				toScan = append(toScan, a)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("audio stream index %d not found or not audio", idx)
-		}
-	}
-
-	// Determine video frame rate for RMS interval (fallback 25 fps)
-	videoFPS := 25.0
-	for _, s := range m.Raw.Streams {
-		if s.CodecType == ffprobe.StreamTypeVideo {
-			if fps := s.FPS(); fps > 0 {
-				videoFPS = fps
-				break
-			}
-		}
-	}
-
-	// Platform‑specific null device
-	nullDev := "/dev/null"
-	if runtime.GOOS == "windows" {
-		nullDev = "NUL"
-	}
-
-	var (
-		filterParts []string
-		// mapLabels   []string
-	)
-
-	for _, aud := range toScan {
-		s := aud.stream
-		globalIdx := aud.globalIndex
-		audioIdx := aud.audioIndex
-
-		sampleRate := s.SampleRateHz()
-		if sampleRate <= 0 {
-			return nil, fmt.Errorf("stream %d: invalid sample rate", globalIdx)
-		}
-		channels := s.Channels
-		if channels <= 0 {
-			return nil, fmt.Errorf("stream %d: invalid channel count", globalIdx)
-		}
-		layout := s.ChannelLayout
-		if layout == "" {
-			switch channels {
-			case 1:
-				layout = "mono"
-			case 2:
-				layout = "stereo"
-			case 6:
-				layout = "5.1"
-			case 8:
-				layout = "7.1"
-			default:
-				return nil, fmt.Errorf("stream %d: unsupported channel layout (%d ch)", globalIdx, channels)
-			}
-		}
-
-		samplesPerFrame := int(math.Round(float64(sampleRate) / videoFPS))
-		if samplesPerFrame < 1 {
-			samplesPerFrame = 1
-		}
-
-		// Уникальные метки
-		lblMix := fmt.Sprintf("a_lufs_mix_%d", globalIdx)
-		lblRmsInt := fmt.Sprintf("a_rms_int_%d", globalIdx)
-		lblRmsOvr := fmt.Sprintf("a_rms_ovr_%d", globalIdx)
-		lblChSplit := fmt.Sprintf("a_lufs_ch_%d", globalIdx)
-
-		// asplit
-		splitLine := fmt.Sprintf("[0:a:%d]asplit=4 [%s] [%s] [%s] [%s]",
-			audioIdx, lblMix, lblRmsInt, lblRmsOvr, lblChSplit)
-		filterParts = append(filterParts, splitLine)
-
-		// --- LUFS mix (тег mix_lufs) ---
-		mixLine := fmt.Sprintf(
-			"[%s] ebur128=video=0:meter=18:metadata=1, ametadata=mode=add:key=tag:value=mix_lufs, ametadata=mode=print:file=-, anullsink",
-			lblMix)
-		filterParts = append(filterParts, mixLine)
-
-		// --- RMS intervals (тег rms_int) ---
-		rmsIntLine := fmt.Sprintf(
-			"[%s] asetnsamples=%d, astats=metadata=1:reset=1, ametadata=mode=add:key=tag:value=rms_int, ametadata=mode=print:file=-, anullsink",
-			lblRmsInt, samplesPerFrame)
-		filterParts = append(filterParts, rmsIntLine)
-
-		// --- RMS overall (тег rms_ovr) ---
-		rmsOvrLine := fmt.Sprintf(
-			"[%s] astats=metadata=1:reset=0, ametadata=mode=add:key=tag:value=rms_ovr, ametadata=mode=print:file=-, anullsink",
-			lblRmsOvr)
-		filterParts = append(filterParts, rmsOvrLine)
-
-		// --- Per‑channel LUFS ---
-		chLabels := make([]string, channels)
-		for ch := 0; ch < channels; ch++ {
-			chLabels[ch] = fmt.Sprintf("ch%d_%d", ch+1, globalIdx)
-		}
-
-		chSplitLine := fmt.Sprintf("[%s] channelsplit=channel_layout=%s %s",
-			lblChSplit, layout,
-			strings.Join(bracketize(chLabels), " "))
-		filterParts = append(filterParts, chSplitLine)
-
-		for ch := 0; ch < channels; ch++ {
-			tagVal := fmt.Sprintf("ch%d_lufs", ch+1)
-			chLine := fmt.Sprintf(
-				"[%s] ebur128=video=0:meter=18:metadata=1, ametadata=mode=add:key=tag:value=%s, ametadata=mode=print:file=-, anullsink",
-				chLabels[ch], tagVal)
-			filterParts = append(filterParts, chLine)
-		}
-	}
-
-	filterGraph := strings.Join(filterParts, "; ")
-	args := []string{
-		"-i", m.Raw.Format.Filename,
-		"-filter_complex", filterGraph,
-		"-f", "null", nullDev,
-	}
-	return exec.Command("ffmpeg", args...), nil
+	// выполняем команду
+	// парсим файлы
+	// записываем данные в аудио потоки
+	err = m.ExecScanRMS(asCommand(cmd))
+	return err
 }
 
-// bracketize wraps each string in square brackets.
-func bracketize(s []string) []string {
-	out := make([]string, len(s))
-	for i, v := range s {
-		out[i] = "[" + v + "]"
+func (m *Media) collectAudioStreamInfo(audio ...int) ([]AudioStreamInfo, error) {
+	asi := []AudioStreamInfo{}
+	for i, a := range m.Audio {
+		if len(audio) != 0 && !slices.Contains(audio, i) {
+			continue
+		}
+		as := AudioStreamInfo{
+			Index:         i,
+			ChannelLayout: a.raw.ChannelLayout,
+			Channels:      setChannelTags(a.raw),
+		}
+		if len(as.Channels) < 1 {
+			fmt.Println(a.raw.CodecType, a.raw.Channels)
+			return nil, fmt.Errorf("unknown channel layout for audio %d of %s: %q", i, m.Path, as.ChannelLayout)
+		}
+		intervalSamples := a.raw.SampleRateHz() / defaultIntervalDurationFactor
+		if intervalSamples < minimalIntervalSamples {
+			return nil, fmt.Errorf("sample rate for audio %d of %s: is low as fuck: %dHz", i, m.Path, a.raw.SampleRateHz())
+		}
+		as.IntervalSamples = intervalSamples
+		asi = append(asi, as)
 	}
-	return out
+	return asi, nil
 }
 
-// func Run() {
-// 	mg, err := New(`\\192.168.31.4\buffer\IN\_DONE\testing_sources\Aston_Braun_vs_Sem_Dzhilli_D_PRT260418001456\test.mov`)
-// 	fmt.Println(err)
-// 	fmt.Println(mg)
-// 	fmt.Println(mg.MediaFiles[0])
-// 	cmd, err := mg.MediaFiles[0].ScanAudioRaw()
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
+// ChannelNames maps known ffmpeg channel layouts to the individual channel labels.
+var ChannelNames = map[string][]string{
+	"mono":      {"m"},
+	"stereo":    {"L", "R"},
+	"5.0":       {"L", "R", "C", "Lb", "Rb"},
+	"5.1":       {"L", "R", "C", "Lfe", "Lb", "Rb"},
+	"5.1(side)": {"L", "R", "C", "Lfe", "Ls", "Rs"},
+	"6.1":       {"L", "R", "C", "Lfe", "Lb", "Rb", "BC"},
+	"7.1":       {"L", "R", "C", "Lfe", "Lb", "Rb", "Ls", "Rs"},
+}
 
-// 	// stdout направляем в pipe для парсинга
-// 	// stdout, err := cmd.StdoutPipe()
-// 	// if err != nil {
-// 	// 	log.Fatal(err)
-// 	// }
-// 	stdout, _ := cmd.StdoutPipe()
-// 	cmd.Stderr = os.Stderr // прогресс-бар виден сразу
-// 	cmd.Start()
-
-// 	scanner := bufio.NewScanner(stdout)
-// 	scanner.Buffer(make([]byte, 1<<20), 10<<20)
-
-// 	var currentTag, frameTime string
-
-// 	for scanner.Scan() {
-// 		line := scanner.Text()
-// 		// fmt.Fprintln(os.Stderr, line) // диагностический вывод (можно удалить)
-
-// 		if strings.HasPrefix(line, "frame:") {
-// 			for _, f := range strings.Fields(line) {
-// 				if strings.HasPrefix(f, "pts_time=") {
-// 					frameTime = strings.TrimPrefix(f, "pts_time=")
-// 					break
-// 				}
-// 			}
-// 			continue
-// 		}
-// 		if strings.HasPrefix(line, "tag=") {
-// 			currentTag = strings.TrimPrefix(line, "tag=")
-// 			continue
-// 		}
-
-// 		switch currentTag {
-// 		case "rms_int", "rms_ovr":
-// 			if strings.Contains(line, "RMS_level") || strings.Contains(line, "Peak_level") ||
-// 				strings.Contains(line, "RMS_peak") || strings.Contains(line, "RMS_trough") {
-// 				// сохранение
-// 				fmt.Fprintln(os.Stderr, "RMS: "+line) // диагностический вывод (можно удалить)
-
-// 			}
-// 		case "mix_lufs", "ch1_lufs", "ch2_lufs":
-// 			if strings.Contains(line, "lavfi.r128.M") || strings.Contains(line, "lavfi.r128.S") ||
-// 				strings.Contains(line, "lavfi.r128.I") {
-// 				fmt.Fprintln(os.Stderr, "LUFS: "+line) // диагностический вывод (можно удалить)
-// 				// сохранение
-// 			}
-// 		}
-// 	}
-// 	if err := scanner.Err(); err != nil {
-// 		log.Fatal("scanner error:", err)
-// 	}
-// 	cmd.Wait()
-// 	frameTime += ""
-// }
-
-func Run() {
-	mg, err := New(`\\192.168.31.4\buffer\IN\_DONE\testing_sources\Aston_Braun_vs_Sem_Dzhilli_D_PRT260418001456\test.mov`)
-	if err != nil {
-		log.Fatal(err)
+func setChannelTags(r ffprobe.Stream) []string {
+	lay := r.ChannelLayout
+	chans := ChannelNames[lay]
+	if len(chans) == 0 {
+		for i := 1; i <= r.Channels; i++ {
+			chans = append(chans, fmt.Sprintf("%dch", i))
+		}
 	}
-	fmt.Println(err)
-	fmt.Println(mg)
-	fmt.Println(mg.MediaFiles[0])
+	return chans
+}
 
-	// Получаем исходную команду ffmpeg
-	cmd, err := mg.MediaFiles[0].ScanAudioRaw()
+// AudioStreamInfo holds all necessary information about one audio stream.
+type AudioStreamInfo struct {
+	Index           int
+	ChannelLayout   string
+	Channels        []string
+	IntervalSamples int
+}
+
+func asCommand(cm string) *exec.Cmd {
+	cm = strings.ReplaceAll(cm, "ffmpeg ", "ffmpeg -nostats -v error ")
+	cm = strings.ReplaceAll(cm, `"`, "")
+	re := regexp.MustCompile(`file='.*?'\[`)
+	cm = re.ReplaceAllString(cm, "file=-[")
+	args := strings.Split(cm, " ")
+	return exec.Command(args[0], args[1:]...)
+}
+
+func (m *Media) ExecScanRMS(cmd *exec.Cmd) error {
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	// Запускаем команду с отдельными pipe для stdout и stderr
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Захват stderr (чтобы не потерять ошибки ffmpeg)
+	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		log.Fatal(err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("start: %w", err)
 	}
 
-	// Объединяем stdout и stderr в один io.Reader через io.Pipe
-	mergedReader, mergedWriter := io.Pipe()
-
+	// Чтение stdout и stderr параллельно
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Горутина для копирования stdout в mergedWriter
 	go func() {
 		defer wg.Done()
-		io.Copy(mergedWriter, stdoutPipe)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "frame") || strings.Contains(line, "RMS_level") || strings.Contains(line, "Peak_level") {
+				fmt.Println(line)
+			}
+		}
 	}()
-	// Горутина для копирования stderr в mergedWriter
+
 	go func() {
 		defer wg.Done()
-		io.Copy(mergedWriter, stderrPipe)
-	}()
-	// Когда оба потока закончатся, закрываем писатель mergedWriter
-	go func() {
-		wg.Wait()
-		mergedWriter.Close()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			fmt.Fprintln(os.Stderr, "FFmpeg:", scanner.Text())
+		}
 	}()
 
-	// Сканер читает объединённый поток
-	scanner := bufio.NewScanner(mergedReader)
-	scanner.Buffer(make([]byte, 1<<20), 10<<20)
+	wg.Wait()
+	err = cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("command failed: %w", err)
+	}
+	return nil
+}
 
-	var currentTag string
-	var frameTime string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Диагностика: можно вывести всё, что идёт (чтобы убедиться, что потоки объединены)
-		// fmt.Fprintln(os.Stderr, "DEBUG:", line)
-
-		// Парсим строки метаданных
-		if strings.HasPrefix(line, "frame:") {
-			for _, f := range strings.Fields(line) {
-				if strings.HasPrefix(f, "pts_time=") {
-					frameTime = strings.TrimPrefix(f, "pts_time=")
-					break
-				}
-			}
-			continue
-		}
-		if strings.HasPrefix(line, "tag=") {
-			currentTag = strings.TrimPrefix(line, "tag=")
-			continue
-		}
-
-		// Фильтрация и вывод только нужных данных
-		var shouldPrint bool
-		switch currentTag {
-		case "rms_int", "rms_ovr":
-			if strings.Contains(line, "RMS_level") || strings.Contains(line, "Peak_level") ||
-				strings.Contains(line, "RMS_peak") || strings.Contains(line, "RMS_trough") {
-				shouldPrint = true
-				line = "RMS: " + line
-			}
-		case "mix_lufs", "ch1_lufs", "ch2_lufs":
-			if strings.Contains(line, "lavfi.r128.M") || strings.Contains(line, "lavfi.r128.S") ||
-				strings.Contains(line, "lavfi.r128.I") {
-				line = "LUFS: " + line
-				shouldPrint = true
-			}
-		}
-		if strings.Contains(line, "time=") {
-			shouldPrint = true
-			line = "PROGRESS: " + line
-		}
-		if shouldPrint {
-			fmt.Println(line) // только отфильтрованное выводится в консоль
-		}
+func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (string, map[string]string, error) {
+	if len(streams) == 0 {
+		return "", nil, errors.New("at least one audio stream must be provided")
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("scanner error: %v", err)
+	var filterParts []string
+	var mapParts []string
+	outputFiles := make(map[string]string)
+	outNamePrefix := filepath.Base(inputFile)
+	outNamePrefix = strings.TrimSuffix(outNamePrefix, filepath.Ext(outNamePrefix))
+
+	for _, s := range streams {
+		streamTag := fmt.Sprintf("stream_%d", s.Index)
+		fileName := fmt.Sprintf("%s_stream_%d.txt", outNamePrefix, s.Index)
+		filePath := filepath.Join(outputDir, fileName)
+		outputFiles[fmt.Sprintf("%d", s.Index)] = filePath
+		filterParts = append(filterParts,
+			fmt.Sprintf("[0:a:%d]asetnsamples=%d,astats=metadata=1:reset=1,ametadata=mode=add:key=frame_end:value=%s,ametadata=mode=print:file='%s'[%s]",
+				s.Index, s.IntervalSamples, streamTag, filePath, streamTag))
+		mapParts = append(mapParts, fmt.Sprintf("-map [%s]", streamTag))
 	}
 
-	// Дожидаемся завершения ffmpeg
-	if err := cmd.Wait(); err != nil {
-		log.Printf("ffmpeg exited with error: %v", err)
+	filterComplex := strings.Join(filterParts, ";")
+	mapArgs := strings.Join(mapParts, " ")
+
+	cmd := fmt.Sprintf("ffmpeg -i %s -filter_complex \"%s\" %s -f null -",
+		inputFile, filterComplex, mapArgs)
+	cmd = strings.ReplaceAll(cmd, "\\", "/")
+	for k := range outputFiles {
+		outputFiles[k] = filepath.ToSlash(outputFiles[k])
 	}
-	fmt.Println("Finished, last frame time:", frameTime)
+
+	return cmd, outputFiles, nil
+}
+
+func testCMD() {
+	cmd := exec.Command("ffmpeg", "-i", "input")
+	cmd.Args = append(cmd.Args, "out")
+	fmt.Println(cmd.Args)
 }
