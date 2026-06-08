@@ -1,23 +1,23 @@
 package mediagroup
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
-	"sync"
+	"unicode"
 
+	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
 	"github.com/Galdoba/ffquery/pkg/ffprobe"
 )
 
 const (
 	minimalIntervalSamples        = 200
 	defaultIntervalDurationFactor = 10
+	command_ScanRMS               = "RMS"
 )
 
 func (m *Media) ScanRmsLevels(audio ...int) error {
@@ -27,15 +27,9 @@ func (m *Media) ScanRmsLevels(audio ...int) error {
 		return fmt.Errorf("failed to collect audio stream info: %w", err)
 	}
 	cmd, paths, err := generateLoudnessStatsScanCommand(m.Path, asi, filepath.Dir(m.Path))
-	fmt.Println(cmd)
-	for k, v := range paths {
-		fmt.Println("===")
-		fmt.Println(k, ":", v)
+	if err != nil {
+		return fmt.Errorf("failed to generate ffmpeg commend: %w", err)
 	}
-	// выполняем команду
-	// парсим файлы
-	// записываем данные в аудио потоки
-	err = m.ExecScanRMS(asCommand(cmd))
 	return err
 }
 
@@ -68,11 +62,11 @@ func (m *Media) collectAudioStreamInfo(audio ...int) ([]AudioStreamInfo, error) 
 var ChannelNames = map[string][]string{
 	"mono":      {"m"},
 	"stereo":    {"L", "R"},
-	"5.0":       {"L", "R", "C", "Lb", "Rb"},
-	"5.1":       {"L", "R", "C", "Lfe", "Lb", "Rb"},
-	"5.1(side)": {"L", "R", "C", "Lfe", "Ls", "Rs"},
-	"6.1":       {"L", "R", "C", "Lfe", "Lb", "Rb", "BC"},
-	"7.1":       {"L", "R", "C", "Lfe", "Lb", "Rb", "Ls", "Rs"},
+	"5.0":       {"L", "R", "C", "LB", "RB"},
+	"5.1":       {"L", "R", "C", "LFE", "LB", "RB"},
+	"5.1(side)": {"L", "R", "C", "LFE", "LS", "RS"},
+	"6.1":       {"L", "R", "C", "LFE", "LB", "RB", "BC"},
+	"7.1":       {"L", "R", "C", "LFE", "LB", "RB", "LS", "RS"},
 }
 
 func setChannelTags(r ffprobe.Stream) []string {
@@ -94,69 +88,63 @@ type AudioStreamInfo struct {
 	IntervalSamples int
 }
 
-func asCommand(cm string) *exec.Cmd {
-	cm = strings.ReplaceAll(cm, "ffmpeg ", "ffmpeg -nostats -v error ")
-	cm = strings.ReplaceAll(cm, `"`, "")
-	re := regexp.MustCompile(`file='.*?'\[`)
-	cm = re.ReplaceAllString(cm, "file=-[")
-	args := strings.Split(cm, " ")
-	return exec.Command(args[0], args[1:]...)
-}
+// func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (string, map[string]string, error) {
+// 	if len(streams) == 0 {
+// 		return "", nil, errors.New("at least one audio stream must be provided")
+// 	}
 
-func (m *Media) ExecScanRMS(cmd *exec.Cmd) error {
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
+// 	var filterParts []string
+// 	var mapParts []string
+// 	outputFiles := make(map[string]string)
+// 	outNamePrefix := filepath.Base(inputFile)
+// 	outNamePrefix = strings.TrimSuffix(outNamePrefix, filepath.Ext(outNamePrefix))
 
-	// Захват stderr (чтобы не потерять ошибки ffmpeg)
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
+// 	for _, s := range streams {
+// 		streamTag := fmt.Sprintf("stream_%d", s.Index)
+// 		fileName := fmt.Sprintf("%s_stream_%d.txt", outNamePrefix, s.Index)
+// 		filePath := filepath.Join(outputDir, fileName)
+// 		outputFiles[fmt.Sprintf("%d", s.Index)] = filePath
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
+// 		astat, err := filters.NewAstat(
+// 			filters.AstatMetadata(true),
+// 			filters.AstatReset(1),
+// 			filters.AstatMeasurePerChannel(filters.RMSPeak, filters.PeakLevel),
+// 			filters.AstatMeasureOverall(filters.RMSPeak, filters.PeakLevel),
+// 		)
+// 		if err != nil {
+// 			return "", nil, fmt.Errorf("failed to create astat filter: %w", err)
+// 		}
 
-	// Чтение stdout и stderr параллельно
-	var wg sync.WaitGroup
-	wg.Add(2)
+// 		filterParts = append(filterParts,
+// 			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=print:file='%s'[%s]",
+// 				s.Index, s.IntervalSamples, astat.String(), filePath, streamTag))
+// 		mapParts = append(mapParts, fmt.Sprintf("-map [%s]", streamTag))
+// 	}
 
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.Contains(line, "frame") || strings.Contains(line, "RMS_level") || strings.Contains(line, "Peak_level") {
-				fmt.Println(line)
-			}
-		}
-	}()
+// 	filterComplex := strings.Join(filterParts, ";")
+// 	mapArgs := strings.Join(mapParts, " ")
+// 	progressFile := filepath.Join(outputDir, outNamePrefix+".progress")
 
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			fmt.Fprintln(os.Stderr, "FFmpeg:", scanner.Text())
-		}
-	}()
+// 	cmd := fmt.Sprintf("ffmpeg -hide_banner -v error -progress %s -i %s -filter_complex \"%s\" %s -f null -",
+// 		progressFile,
+// 		inputFile, filterComplex, mapArgs)
+// 	outputFiles["progress"] = progressFile
 
-	wg.Wait()
-	err = cmd.Wait()
-	if err != nil {
-		return fmt.Errorf("command failed: %w", err)
-	}
-	return nil
-}
+// 	cmd = strings.ReplaceAll(cmd, "\\", "/")
+// 	for k := range outputFiles {
+// 		outputFiles[k] = filepath.ToSlash(outputFiles[k])
+// 	}
 
-func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (string, map[string]string, error) {
+// 	return cmd, outputFiles, nil
+// }
+
+func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (*exec.Cmd, map[string]string, error) {
 	if len(streams) == 0 {
-		return "", nil, errors.New("at least one audio stream must be provided")
+		return nil, nil, errors.New("at least one audio stream must be provided")
 	}
 
 	var filterParts []string
-	var mapParts []string
+	var mapArgs []string
 	outputFiles := make(map[string]string)
 	outNamePrefix := filepath.Base(inputFile)
 	outNamePrefix = strings.TrimSuffix(outNamePrefix, filepath.Ext(outNamePrefix))
@@ -165,28 +153,127 @@ func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInf
 		streamTag := fmt.Sprintf("stream_%d", s.Index)
 		fileName := fmt.Sprintf("%s_stream_%d.txt", outNamePrefix, s.Index)
 		filePath := filepath.Join(outputDir, fileName)
-		outputFiles[fmt.Sprintf("%d", s.Index)] = filePath
+		// Приводим к прямым слешам для безопасной передачи в фильтр
+		slashedPath := filepath.ToSlash(filePath)
+		outputFiles[fmt.Sprintf("%d", s.Index)] = slashedPath
+
+		astat, err := filters.NewAstat(
+			filters.AstatMetadata(true),
+			filters.AstatReset(1),
+			filters.AstatMeasurePerChannel(filters.RMSPeak, filters.PeakLevel),
+			filters.AstatMeasureOverall(filters.RMSPeak, filters.PeakLevel),
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create astat filter: %w", err)
+		}
+
 		filterParts = append(filterParts,
-			fmt.Sprintf("[0:a:%d]asetnsamples=%d,astats=metadata=1:reset=1,ametadata=mode=add:key=frame_end:value=%s,ametadata=mode=print:file='%s'[%s]",
-				s.Index, s.IntervalSamples, streamTag, filePath, streamTag))
-		mapParts = append(mapParts, fmt.Sprintf("-map [%s]", streamTag))
+			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=print:file='%s'[%s]",
+				s.Index, s.IntervalSamples, astat.String(), slashedPath, streamTag))
+
+		// Для exec.Cmd каждый map‑аргумент передаётся отдельно
+		mapArgs = append(mapArgs, "-map", fmt.Sprintf("[%s]", streamTag))
 	}
 
 	filterComplex := strings.Join(filterParts, ";")
-	mapArgs := strings.Join(mapParts, " ")
+	progressFile := filepath.Join(outputDir, outNamePrefix+".progress")
+	slashedProgress := filepath.ToSlash(progressFile)
+	outputFiles["progress"] = slashedProgress
 
-	cmd := fmt.Sprintf("ffmpeg -i %s -filter_complex \"%s\" %s -f null -",
-		inputFile, filterComplex, mapArgs)
-	cmd = strings.ReplaceAll(cmd, "\\", "/")
-	for k := range outputFiles {
-		outputFiles[k] = filepath.ToSlash(outputFiles[k])
+	// Формируем слайс аргументов для exec.Cmd
+	args := []string{
+		"-hide_banner", "-v", "error",
+		"-progress", slashedProgress,
+		"-i", inputFile,
+		"-filter_complex", filterComplex,
 	}
+	args = append(args, mapArgs...)
+	args = append(args, "-f", "null", "-")
+
+	cmd := exec.Command("ffmpeg", args...)
 
 	return cmd, outputFiles, nil
 }
 
-func testCMD() {
-	cmd := exec.Command("ffmpeg", "-i", "input")
-	cmd.Args = append(cmd.Args, "out")
-	fmt.Println(cmd.Args)
+func isStatLine(line string) bool {
+	if !strings.Contains(line, "lavfi.astats.") {
+		return false
+	}
+	if !strings.Contains(line, "RMS_level") && !strings.Contains(line, "Peak_level") {
+		return false
+	}
+	return true
+}
+
+// RunCommandString разбирает строку команды и выполняет её через exec.Command.
+// Поддерживает одинарные и двойные кавычки, пробелы внутри кавычек не разбивают аргумент.
+// Экранирование символов обратным слешем не реализовано (в ваших данных не требуется).
+func RunCommandString(cmdLine string) error {
+	args, err := parseCommandLine(cmdLine)
+	if err != nil {
+		return fmt.Errorf("ошибка парсинга команды: %w", err)
+	}
+	if len(args) == 0 {
+		return nil
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// parseCommandLine разбивает командную строку на аргументы, поддерживая кавычки.
+func parseCommandLine(s string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := byte(0)
+	i := 0
+	n := len(s)
+
+	for i < n {
+		ch := s[i]
+
+		// Если не в кавычках, ищем пробельные символы для разделения аргументов
+		if !inQuote && unicode.IsSpace(rune(ch)) {
+			// Пробелы – разделители аргументов
+			if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+			i++
+			continue
+		}
+
+		// Обработка открытия/закрытия кавычек
+		if !inQuote && (ch == '"' || ch == '\'') {
+			inQuote = true
+			quoteChar = ch
+			i++
+			continue
+		}
+
+		if inQuote && ch == quoteChar {
+			inQuote = false
+			quoteChar = 0
+			i++
+			continue
+		}
+
+		// Обычный символ – добавляем в текущий аргумент
+		current.WriteByte(ch)
+		i++
+	}
+
+	// Последний аргумент
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+
+	if inQuote {
+		return nil, fmt.Errorf("незакрытая кавычка %c", quoteChar)
+	}
+
+	return args, nil
 }

@@ -8,7 +8,7 @@ import (
 )
 
 func TestRawData_ToMedia(t *testing.T) {
-	raw, err := ffprobe.NewRawData(`\\192.168.31.4\buffer\IN\_DONE\testing_sources\Dilan_Arbakl_vs_Niko_Leivars_D_PRT260417230822\SPO_40600.mp4`)
+	raw, err := ffprobe.NewRawData(`\\192.168.31.4\buffer\IN\_DONE\Slaym_ochen_lipkoe_priklyuchenie_de_nog_grotere_slijmfilm--FILM--DeNogGrotereSlijmfilm_FTR_en_nl20_nl51_en20_en51_1920x1080_25.mov`)
 	fmt.Println(err)
 	// m, err := raw.ToMedia()
 	// fmt.Println(err)

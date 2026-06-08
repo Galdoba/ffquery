@@ -21,6 +21,8 @@ type Media struct {
 	Audio     []AStream
 	Data      []DStream
 	Subtitles []SStream
+	Commands  map[string]string
+	Duration  float64
 }
 
 type VStream struct {
@@ -58,6 +60,7 @@ func newMedia(path string) (*Media, error) {
 	}
 	m.Raw = r
 	m.Path = path
+	m.Commands = make(map[string]string)
 	return &m, nil
 }
 
@@ -107,6 +110,7 @@ func processFile(fileIndex int, path string) (*Media, error) {
 	}
 	for streamIndex, s := range m.Raw.Streams {
 		fmt.Println("add", s.CodecType)
+		m.Duration = max(m.Duration, s.DurationSeconds())
 		switch s.CodecType {
 		case ffprobe.StreamTypeVideo:
 			m.Video = append(m.Video, VStream{
