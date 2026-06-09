@@ -1,27 +1,32 @@
 package mediagroup
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
-	"unicode"
+	"time"
 
 	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
 	"github.com/Galdoba/ffquery/pkg/ffprobe"
+	"github.com/Galdoba/ffquery/pkg/media/streammap"
 )
 
 const (
 	minimalIntervalSamples        = 200
 	defaultIntervalDurationFactor = 10
 	command_ScanRMS               = "RMS"
+	progressFileKey               = "progress"
+	csvFileKey                    = "csv"
 )
 
 func (m *Media) ScanRmsLevels(audio ...int) error {
-	// строим команду
 	asi, err := m.collectAudioStreamInfo(audio...)
 	if err != nil {
 		return fmt.Errorf("failed to collect audio stream info: %w", err)
@@ -30,7 +35,7 @@ func (m *Media) ScanRmsLevels(audio ...int) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate ffmpeg commend: %w", err)
 	}
-	return err
+	return m.executeAudioScanCommand(context.Background(), cmd, paths)
 }
 
 func (m *Media) collectAudioStreamInfo(audio ...int) ([]AudioStreamInfo, error) {
@@ -88,56 +93,6 @@ type AudioStreamInfo struct {
 	IntervalSamples int
 }
 
-// func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (string, map[string]string, error) {
-// 	if len(streams) == 0 {
-// 		return "", nil, errors.New("at least one audio stream must be provided")
-// 	}
-
-// 	var filterParts []string
-// 	var mapParts []string
-// 	outputFiles := make(map[string]string)
-// 	outNamePrefix := filepath.Base(inputFile)
-// 	outNamePrefix = strings.TrimSuffix(outNamePrefix, filepath.Ext(outNamePrefix))
-
-// 	for _, s := range streams {
-// 		streamTag := fmt.Sprintf("stream_%d", s.Index)
-// 		fileName := fmt.Sprintf("%s_stream_%d.txt", outNamePrefix, s.Index)
-// 		filePath := filepath.Join(outputDir, fileName)
-// 		outputFiles[fmt.Sprintf("%d", s.Index)] = filePath
-
-// 		astat, err := filters.NewAstat(
-// 			filters.AstatMetadata(true),
-// 			filters.AstatReset(1),
-// 			filters.AstatMeasurePerChannel(filters.RMSPeak, filters.PeakLevel),
-// 			filters.AstatMeasureOverall(filters.RMSPeak, filters.PeakLevel),
-// 		)
-// 		if err != nil {
-// 			return "", nil, fmt.Errorf("failed to create astat filter: %w", err)
-// 		}
-
-// 		filterParts = append(filterParts,
-// 			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=print:file='%s'[%s]",
-// 				s.Index, s.IntervalSamples, astat.String(), filePath, streamTag))
-// 		mapParts = append(mapParts, fmt.Sprintf("-map [%s]", streamTag))
-// 	}
-
-// 	filterComplex := strings.Join(filterParts, ";")
-// 	mapArgs := strings.Join(mapParts, " ")
-// 	progressFile := filepath.Join(outputDir, outNamePrefix+".progress")
-
-// 	cmd := fmt.Sprintf("ffmpeg -hide_banner -v error -progress %s -i %s -filter_complex \"%s\" %s -f null -",
-// 		progressFile,
-// 		inputFile, filterComplex, mapArgs)
-// 	outputFiles["progress"] = progressFile
-
-// 	cmd = strings.ReplaceAll(cmd, "\\", "/")
-// 	for k := range outputFiles {
-// 		outputFiles[k] = filepath.ToSlash(outputFiles[k])
-// 	}
-
-// 	return cmd, outputFiles, nil
-// }
-
 func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (*exec.Cmd, map[string]string, error) {
 	if len(streams) == 0 {
 		return nil, nil, errors.New("at least one audio stream must be provided")
@@ -151,7 +106,7 @@ func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInf
 
 	for _, s := range streams {
 		streamTag := fmt.Sprintf("stream_%d", s.Index)
-		fileName := fmt.Sprintf("%s_stream_%d.txt", outNamePrefix, s.Index)
+		fileName := fmt.Sprintf("%s%s", outNamePrefix, streammap.NewAstatFileSuffix(s.Index))
 		filePath := filepath.Join(outputDir, fileName)
 		// Приводим к прямым слешам для безопасной передачи в фильтр
 		slashedPath := filepath.ToSlash(filePath)
@@ -178,8 +133,8 @@ func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInf
 	filterComplex := strings.Join(filterParts, ";")
 	progressFile := filepath.Join(outputDir, outNamePrefix+".progress")
 	slashedProgress := filepath.ToSlash(progressFile)
-	outputFiles["progress"] = slashedProgress
-
+	outputFiles[progressFileKey] = slashedProgress
+	outputFiles[csvFileKey] = filepath.Join(outputDir, outNamePrefix+".AstatsScan.csv")
 	// Формируем слайс аргументов для exec.Cmd
 	args := []string{
 		"-hide_banner", "-v", "error",
@@ -205,75 +160,165 @@ func isStatLine(line string) bool {
 	return true
 }
 
-// RunCommandString разбирает строку команды и выполняет её через exec.Command.
-// Поддерживает одинарные и двойные кавычки, пробелы внутри кавычек не разбивают аргумент.
-// Экранирование символов обратным слешем не реализовано (в ваших данных не требуется).
-func RunCommandString(cmdLine string) error {
-	args, err := parseCommandLine(cmdLine)
+func extractCurrentOutTime(path string) float64 {
+	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("ошибка парсинга команды: %w", err)
+		return -1
 	}
-	if len(args) == 0 {
-		return nil
+	defer file.Close()
+	const prefix = "out_time_us=" //ffmpeg prints as nanoseconds
+	var lastOutTimeUs int64 = -1
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+
+		valStr := line[len(prefix):]
+		val, err := strconv.ParseInt(valStr, 10, 64)
+		if err == nil {
+			lastOutTimeUs = val
+		}
 	}
 
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := scanner.Err(); err != nil {
+		return -1
+	}
+	if lastOutTimeUs < 0 {
+		return -1
+	}
+
+	return float64(lastOutTimeUs) / 1000000.0 * 100.0
 }
 
-// parseCommandLine разбивает командную строку на аргументы, поддерживая кавычки.
-func parseCommandLine(s string) ([]string, error) {
-	var args []string
-	var current strings.Builder
-	inQuote := false
-	quoteChar := byte(0)
-	i := 0
-	n := len(s)
+func printProgressBar(percent float64) {
+	percent = max(percent, 0)
+	percent = min(percent, 100)
+	s := "scanning: ["
+	for i := 10.0; i < percent; i = i + 10 {
+		s += "="
+	}
+	s += ">"
+	for len(s) < 21 {
+		s += " "
+	}
+	s += "] "
+	fmt.Printf("%s%.2f%%\r", s, percent)
+}
 
-	for i < n {
-		ch := s[i]
+// parseAudioStatsFile парсит файл с метаданными аудиопотока.
+// Возвращает любые данные (в реальности – структуру с уровнями RMS и пиков).
+func parseAudioStatsFile(filePath string) (interface{}, error) {
+	// Заглушка: возвращаем имя файла, чтобы было видно, что файл обработан.
+	return fmt.Sprintf("stats from %s", filePath), nil
+}
 
-		// Если не в кавычках, ищем пробельные символы для разделения аргументов
-		if !inQuote && unicode.IsSpace(rune(ch)) {
-			// Пробелы – разделители аргументов
-			if current.Len() > 0 {
-				args = append(args, current.String())
-				current.Reset()
+// analyzeAndPrintResults принимает карту с результатами парсинга по ключам потоков и выводит сводку.
+func analyzeAndPrintResults(results map[string]interface{}) {
+	fmt.Println("\nРезультаты анализа аудио:")
+	for key, val := range results {
+		fmt.Printf("  Поток %s: %v\n", key, val)
+	}
+}
+
+// ---- Основная функция ----
+
+// executeAudioScanCommand запускает команду ffmpeg, мониторит файл прогресса,
+// дожидается завершения и обрабатывает выходные файлы.
+func (m *Media) executeAudioScanCommand(ctx context.Context, cmd *exec.Cmd, paths map[string]string) error {
+	// Извлекаем путь к файлу прогресса
+	progressPath, ok := paths[progressFileKey]
+	if !ok {
+		return fmt.Errorf("в карте paths отсутствует ключ 'progress'")
+	}
+
+	// Запускаем процесс
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("не удалось запустить команду: %w", err)
+	}
+
+	// Канал для получения результата Wait()
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	// Тикер для периодического чтения прогресса
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Основной цикл: ждём завершения команды, отмены контекста или нового тика
+	for {
+		select {
+		case <-ctx.Done():
+			// Контекст отменён – убиваем процесс
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
 			}
-			i++
+			// Ожидаем завершения горутины с Wait, чтобы избежать зомби
+			<-done
+			return ctx.Err()
+
+		case err := <-done:
+			// Команда завершилась (успешно или с ошибкой)
+			if err != nil {
+				return fmt.Errorf("команда ffmpeg завершилась с ошибкой: %w", err)
+			}
+			goto processResults // not ideomatic but talerated in this case
+
+		case <-ticker.C:
+			currentTime := extractCurrentOutTime(progressPath)
+			printProgressBar(currentTime / m.Duration)
+		}
+	}
+	cmd.Process.Kill()
+
+processResults:
+	printProgressBar(100)
+	fmt.Println() // перевод строки после прогресс-бара
+
+	// Собираем пути к выходным файлам (все ключи, кроме "progress")
+	statFiles := []string{}
+	for key, filePath := range paths {
+		if key == progressFileKey {
 			continue
 		}
-
-		// Обработка открытия/закрытия кавычек
-		if !inQuote && (ch == '"' || ch == '\'') {
-			inQuote = true
-			quoteChar = ch
-			i++
+		// Проверяем, что ключ – это номер аудиопотока (0,1,...)
+		if _, err := strconv.Atoi(key); err != nil {
 			continue
 		}
+		statFiles = append(statFiles, filePath)
 
-		if inQuote && ch == quoteChar {
-			inQuote = false
-			quoteChar = 0
-			i++
+		// stats, err := parseAudioStatsFile(filePath)
+		// if err != nil {
+		// 	return fmt.Errorf("ошибка парсинга файла %s: %w", filePath, err)
+		// }
+		// results[key] = stats
+	}
+	slices.Sort(statFiles)
+
+	lm, err := streammap.ParseAstatFiles(statFiles)
+	if err != nil {
+		return fmt.Errorf("failed to parse astats files: %w", err)
+	}
+
+	f, err := os.Create(paths[csvFileKey])
+	if err != nil {
+		return fmt.Errorf("failed to create result file: %w", err)
+	}
+	defer f.Close()
+	if err := lm.WriteWideCSV(f); err != nil {
+		return err
+	}
+	time.Sleep(time.Second)
+	for k, path := range paths {
+		if k == csvFileKey {
 			continue
 		}
-
-		// Обычный символ – добавляем в текущий аргумент
-		current.WriteByte(ch)
-		i++
+		f, _ := os.Create(path)
+		f.Close()
+		fmt.Println("delete", path, os.Remove(path))
 	}
-
-	// Последний аргумент
-	if current.Len() > 0 {
-		args = append(args, current.String())
-	}
-
-	if inQuote {
-		return nil, fmt.Errorf("незакрытая кавычка %c", quoteChar)
-	}
-
-	return args, nil
+	return nil
 }
