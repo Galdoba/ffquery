@@ -52,6 +52,10 @@ type SStream struct {
 	raw         ffprobe.Stream
 }
 
+func NewMedia(path string) (*Media, error) {
+	return newMedia(path)
+}
+
 func newMedia(path string) (*Media, error) {
 	m := Media{}
 	r, err := ffprobe.NewRawData(path)

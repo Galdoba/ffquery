@@ -21,7 +21,7 @@ const (
 	astatsLineExpression     = `^` + astatsLineMarker + `(\d+|Overall)\.(\w+)=(.+)$`
 	frameExpression          = `frame:(\d+)`
 	frameFactor              = 0.1
-	silenceValue             = -120.0
+	ffmpegSilenceValue       = -750.0
 )
 
 type ErrInvalidLineFormat error
@@ -170,12 +170,12 @@ func parseValue(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	low := strings.ToLower(s)
 	if low == "inf" || low == "+inf" || low == "-inf" || low == "nan" {
-		return silenceValue, nil
+		return ffmpegSilenceValue, nil
 	}
 
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return silenceValue, fmt.Errorf("failed to parse %q: %w", s, err)
+		return ffmpegSilenceValue, fmt.Errorf("failed to parse %q: %w", s, err)
 	}
 	return val, nil
 }
@@ -261,7 +261,7 @@ func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 			if frameIdx < len(col.values) {
 				val = col.values[frameIdx]
 			} else {
-				val = silenceValue
+				val = ffmpegSilenceValue
 			}
 			record = append(record, strconv.FormatFloat(val, 'f', 6, 64))
 		}
@@ -316,7 +316,7 @@ func (lm *LoudnessMap) populateFromCSVRow(record []string, cols []columnMapping)
 	}
 
 	for idx, col := range cols {
-		var val float64 = silenceValue
+		var val float64 = ffmpegSilenceValue
 		if idx+2 < len(record) {
 			var err error
 			val, err = parseValue(record[idx+2])

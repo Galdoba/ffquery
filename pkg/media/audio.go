@@ -26,16 +26,12 @@ const (
 	csvFileKey                    = "csv"
 )
 
-func (m *Media) ScanRmsLevels(audio ...int) error {
-	asi, err := m.collectAudioStreamInfo(audio...)
-	if err != nil {
-		return fmt.Errorf("failed to collect audio stream info: %w", err)
-	}
-	cmd, paths, err := generateLoudnessStatsScanCommand(m.Path, asi, filepath.Dir(m.Path))
+func (m *Media) ScanAstats(ctx context.Context, measurements ...filters.AstatMeasure) error {
+	cmd, paths, err := m.generateLoudnessStatsScanCommand(measurements)
 	if err != nil {
 		return fmt.Errorf("failed to generate ffmpeg commend: %w", err)
 	}
-	return m.executeAudioScanCommand(context.Background(), cmd, paths)
+	return m.executeAudioScanCommand(ctx, cmd, paths)
 }
 
 func (m *Media) collectAudioStreamInfo(audio ...int) ([]AudioStreamInfo, error) {
@@ -93,21 +89,25 @@ type AudioStreamInfo struct {
 	IntervalSamples int
 }
 
-func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInfo, outputDir string) (*exec.Cmd, map[string]string, error) {
+func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMeasure) (*exec.Cmd, map[string]string, error) {
+	streams, err := m.collectAudioStreamInfo()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to collect audio stream info: %w", err)
+	}
 	if len(streams) == 0 {
 		return nil, nil, errors.New("at least one audio stream must be provided")
 	}
-
 	var filterParts []string
 	var mapArgs []string
+	dir := filepath.Dir(m.Path)
 	outputFiles := make(map[string]string)
-	outNamePrefix := filepath.Base(inputFile)
+	outNamePrefix := filepath.Base(m.Path)
 	outNamePrefix = strings.TrimSuffix(outNamePrefix, filepath.Ext(outNamePrefix))
 
 	for _, s := range streams {
 		streamTag := fmt.Sprintf("stream_%d", s.Index)
 		fileName := fmt.Sprintf("%s%s", outNamePrefix, streammap.NewAstatFileSuffix(s.Index))
-		filePath := filepath.Join(outputDir, fileName)
+		filePath := filepath.Join(dir, fileName)
 		// Приводим к прямым слешам для безопасной передачи в фильтр
 		slashedPath := filepath.ToSlash(filePath)
 		outputFiles[fmt.Sprintf("%d", s.Index)] = slashedPath
@@ -115,8 +115,8 @@ func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInf
 		astat, err := filters.NewAstat(
 			filters.AstatMetadata(true),
 			filters.AstatReset(1),
-			filters.AstatMeasurePerChannel(filters.RMSPeak, filters.PeakLevel),
-			filters.AstatMeasureOverall(filters.RMSPeak, filters.PeakLevel),
+			filters.AstatMeasurePerChannel(measurements...),
+			filters.AstatMeasureOverall(measurements...),
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create astat filter: %w", err)
@@ -131,15 +131,15 @@ func generateLoudnessStatsScanCommand(inputFile string, streams []AudioStreamInf
 	}
 
 	filterComplex := strings.Join(filterParts, ";")
-	progressFile := filepath.Join(outputDir, outNamePrefix+".progress")
+	progressFile := filepath.Join(dir, outNamePrefix+".progress")
 	slashedProgress := filepath.ToSlash(progressFile)
 	outputFiles[progressFileKey] = slashedProgress
-	outputFiles[csvFileKey] = filepath.Join(outputDir, outNamePrefix+".AstatsScan.csv")
+	outputFiles[csvFileKey] = filepath.Join(dir, outNamePrefix+".AstatsScan.csv")
 	// Формируем слайс аргументов для exec.Cmd
 	args := []string{
 		"-hide_banner", "-v", "error",
 		"-progress", slashedProgress,
-		"-i", inputFile,
+		"-i", m.Path,
 		"-filter_complex", filterComplex,
 	}
 	args = append(args, mapArgs...)
@@ -272,7 +272,6 @@ func (m *Media) executeAudioScanCommand(ctx context.Context, cmd *exec.Cmd, path
 			printProgressBar(currentTime / m.Duration)
 		}
 	}
-	cmd.Process.Kill()
 
 processResults:
 	printProgressBar(100)
@@ -290,11 +289,6 @@ processResults:
 		}
 		statFiles = append(statFiles, filePath)
 
-		// stats, err := parseAudioStatsFile(filePath)
-		// if err != nil {
-		// 	return fmt.Errorf("ошибка парсинга файла %s: %w", filePath, err)
-		// }
-		// results[key] = stats
 	}
 	slices.Sort(statFiles)
 

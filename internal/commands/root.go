@@ -3,8 +3,6 @@ package commands
 import (
 	"context"
 	"fmt"
-	"log"
-	"time"
 
 	"github.com/Galdoba/ffquery/internal/infrastructure"
 	"github.com/Galdoba/ffquery/internal/infrastructure/config"
@@ -22,12 +20,14 @@ func Root() cli.Command {
 		Description:    "",
 		DefaultCommand: "",
 		Category:       "",
-		Commands:       []*cli.Command{},
-		Flags:          []cli.Flag{},
-		Before:         nil,
-		After:          nil,
-		Action:         rootAction(),
-		Authors:        []any{"galdoba"},
+		Commands: []*cli.Command{
+			ScanAstats(),
+		},
+		Flags:   []cli.Flag{},
+		Before:  nil,
+		After:   nil,
+		Action:  rootAction(),
+		Authors: []any{"galdoba"},
 	}
 
 	return cmd
@@ -48,11 +48,6 @@ func rootAction() cli.ActionFunc {
 				fmt.Println(data.Render())
 				fmt.Println(data)
 			}
-			hash, err := ffprobe.HashFileWithProgress(arg, 2*time.Second)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Println("\nSHA-256:", hash)
 		}
 		return nil
 	}
