@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Galdoba/ffquery/internal/infrastructure"
 	"github.com/Galdoba/ffquery/internal/infrastructure/config"
@@ -22,11 +23,13 @@ func ScanAstats() *cli.Command {
 		DefaultCommand: "",
 		Category:       "",
 		Commands:       []*cli.Command{},
-		Flags:          []cli.Flag{},
-		Before:         nil,
-		After:          nil,
-		Action:         scanAstatsAction(),
-		Authors:        []any{"galdoba"},
+		// Flags: []cli.Flag{
+		// 	flags.AstatsMeasurments,
+		// },
+		Before:  nil,
+		After:   nil,
+		Action:  scanAstatsAction(),
+		Authors: []any{"galdoba"},
 	}
 
 	return &cmd
@@ -36,18 +39,21 @@ func scanAstatsAction() cli.ActionFunc {
 	return func(ctx context.Context, c *cli.Command) error {
 		inf := infrastructure.Init()
 		logger := inf.GetLogger()
-		fmt.Println(inf.GetConfig())
 		errs := []error{}
+		// fmt.Printf("%v\n", c.StringSlice(scanastats.FlagMeasurmentsPerchannel))
+		// return nil
 		mg, err := mediagroup.New(c.Args().Slice()...)
 		if err != nil {
 			return fmt.Errorf("failed to create mediagroup: %w", err)
 		}
 		for _, m := range mg.MediaFiles {
-			if err := m.ScanAstats(context.Background(), filters.RMSLevel, filters.PeakLevel); err != nil {
+			logger.Info("start scan", "file", m.Path)
+			defaultMeasurements := []filters.AstatMeasure{filters.RMSLevel, filters.PeakLevel}
+			if err := m.ScanAstats(context.Background(), defaultMeasurements, defaultMeasurements); err != nil {
 				errs = append(errs, fmt.Errorf("failed to scan file %s: %w", m.Path, err))
 				continue
 			}
-			logger.Error("failed to scan", "file", m.Path, "error", err)
+			logger.Error("scan completed", "result file", m.Meta["astatsCSV"])
 		}
 		if len(errs) > 0 {
 			return errorReport(errs...)
@@ -60,9 +66,10 @@ func errorReport(errs ...error) error {
 	if len(errs) == 0 {
 		return nil
 	}
-	s := fmt.Sprintf("%d errors detected:\n", len(errs))
+	var s strings.Builder
+	fmt.Fprintf(&s, "%d errors detected:\n", len(errs))
 	for _, err := range errs {
-		s += fmt.Sprintf("  %v\n", err)
+		fmt.Fprintf(&s, "  %v\n", err)
 	}
-	return fmt.Errorf("%s", s)
+	return fmt.Errorf("%s", s.String())
 }

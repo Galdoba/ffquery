@@ -46,11 +46,16 @@ func New() (Infrastructure, error) {
 		return nil, fmt.Errorf("cannot open logfile %q: %w", logpath, err)
 	}
 
-	logger := slog.New(
+	mh := slog.NewMultiHandler(
 		slog.NewJSONHandler(f, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		}),
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}),
 	)
+
+	logger := slog.New(mh)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create logger: %w", err)

@@ -26,11 +26,12 @@ const (
 	csvFileKey                    = "csv"
 )
 
-func (m *Media) ScanAstats(ctx context.Context, measurements ...filters.AstatMeasure) error {
-	cmd, paths, err := m.generateLoudnessStatsScanCommand(measurements)
+func (m *Media) ScanAstats(ctx context.Context, per_channel []filters.AstatMeasure, overall []filters.AstatMeasure) error {
+	cmd, paths, err := m.generateLoudnessStatsScanCommand(per_channel, overall)
 	if err != nil {
 		return fmt.Errorf("failed to generate ffmpeg commend: %w", err)
 	}
+	os.Pipe()
 	return m.executeAudioScanCommand(ctx, cmd, paths)
 }
 
@@ -46,7 +47,6 @@ func (m *Media) collectAudioStreamInfo(audio ...int) ([]AudioStreamInfo, error) 
 			Channels:      setChannelTags(a.raw),
 		}
 		if len(as.Channels) < 1 {
-			fmt.Println(a.raw.CodecType, a.raw.Channels)
 			return nil, fmt.Errorf("unknown channel layout for audio %d of %s: %q", i, m.Path, as.ChannelLayout)
 		}
 		intervalSamples := a.raw.SampleRateHz() / defaultIntervalDurationFactor
@@ -89,7 +89,7 @@ type AudioStreamInfo struct {
 	IntervalSamples int
 }
 
-func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMeasure) (*exec.Cmd, map[string]string, error) {
+func (m *Media) generateLoudnessStatsScanCommand(per_channel []filters.AstatMeasure, overall []filters.AstatMeasure) (*exec.Cmd, map[string]string, error) {
 	streams, err := m.collectAudioStreamInfo()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to collect audio stream info: %w", err)
@@ -108,15 +108,14 @@ func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMea
 		streamTag := fmt.Sprintf("stream_%d", s.Index)
 		fileName := fmt.Sprintf("%s%s", outNamePrefix, streammap.NewAstatFileSuffix(s.Index))
 		filePath := filepath.Join(dir, fileName)
-		// Приводим к прямым слешам для безопасной передачи в фильтр
 		slashedPath := filepath.ToSlash(filePath)
 		outputFiles[fmt.Sprintf("%d", s.Index)] = slashedPath
 
 		astat, err := filters.NewAstat(
 			filters.AstatMetadata(true),
 			filters.AstatReset(1),
-			filters.AstatMeasurePerChannel(measurements...),
-			filters.AstatMeasureOverall(measurements...),
+			filters.AstatMeasurePerChannel(per_channel...),
+			filters.AstatMeasureOverall(overall...),
 		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to create astat filter: %w", err)
@@ -126,7 +125,6 @@ func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMea
 			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=print:file='%s'[%s]",
 				s.Index, s.IntervalSamples, astat.String(), slashedPath, streamTag))
 
-		// Для exec.Cmd каждый map‑аргумент передаётся отдельно
 		mapArgs = append(mapArgs, "-map", fmt.Sprintf("[%s]", streamTag))
 	}
 
@@ -135,7 +133,7 @@ func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMea
 	slashedProgress := filepath.ToSlash(progressFile)
 	outputFiles[progressFileKey] = slashedProgress
 	outputFiles[csvFileKey] = filepath.Join(dir, outNamePrefix+".AstatsScan.csv")
-	// Формируем слайс аргументов для exec.Cmd
+
 	args := []string{
 		"-hide_banner", "-v", "error",
 		"-progress", slashedProgress,
@@ -146,19 +144,18 @@ func (m *Media) generateLoudnessStatsScanCommand(measurements []filters.AstatMea
 	args = append(args, "-f", "null", "-")
 
 	cmd := exec.Command("ffmpeg", args...)
-
 	return cmd, outputFiles, nil
 }
 
-func isStatLine(line string) bool {
-	if !strings.Contains(line, "lavfi.astats.") {
-		return false
-	}
-	if !strings.Contains(line, "RMS_level") && !strings.Contains(line, "Peak_level") {
-		return false
-	}
-	return true
-}
+// func isStatLine(line string) bool {
+// 	if !strings.Contains(line, "lavfi.astats.") {
+// 		return false
+// 	}
+// 	if !strings.Contains(line, "RMS_level") && !strings.Contains(line, "Peak_level") {
+// 		return false
+// 	}
+// 	return true
+// }
 
 func extractCurrentOutTime(path string) float64 {
 	file, err := os.Open(path)
@@ -195,6 +192,9 @@ func extractCurrentOutTime(path string) float64 {
 func printProgressBar(percent float64) {
 	percent = max(percent, 0)
 	percent = min(percent, 100)
+	if percent == 100 {
+		fmt.Fprint(os.Stderr, "scanning: [==========] 100.00%\r")
+	}
 	s := "scanning: ["
 	for i := 10.0; i < percent; i = i + 10 {
 		s += "="
@@ -204,115 +204,226 @@ func printProgressBar(percent float64) {
 		s += " "
 	}
 	s += "] "
-	fmt.Printf("%s%.2f%%\r", s, percent)
-}
-
-// parseAudioStatsFile парсит файл с метаданными аудиопотока.
-// Возвращает любые данные (в реальности – структуру с уровнями RMS и пиков).
-func parseAudioStatsFile(filePath string) (interface{}, error) {
-	// Заглушка: возвращаем имя файла, чтобы было видно, что файл обработан.
-	return fmt.Sprintf("stats from %s", filePath), nil
-}
-
-// analyzeAndPrintResults принимает карту с результатами парсинга по ключам потоков и выводит сводку.
-func analyzeAndPrintResults(results map[string]interface{}) {
-	fmt.Println("\nРезультаты анализа аудио:")
-	for key, val := range results {
-		fmt.Printf("  Поток %s: %v\n", key, val)
-	}
+	fmt.Fprintf(os.Stderr, "%s%.2f%%\r", s, percent)
 }
 
 // ---- Основная функция ----
 
-// executeAudioScanCommand запускает команду ffmpeg, мониторит файл прогресса,
-// дожидается завершения и обрабатывает выходные файлы.
+// // executeAudioScanCommand запускает команду ffmpeg, мониторит файл прогресса,
+// // дожидается завершения и обрабатывает выходные файлы.
+// func (m *Media) executeAudioScanCommand(ctx context.Context, cmd *exec.Cmd, paths map[string]string) error {
+// 	progressPath, ok := paths[progressFileKey]
+// 	if !ok {
+// 		return fmt.Errorf("paths does not contain 'progress'")
+// 	}
+
+// 	fmt.Fprintf(os.Stderr, "run command: %v\n", cmd.Args)
+// 	if err := cmd.Start(); err != nil {
+// 		return fmt.Errorf("failed to run command: %w", err)
+// 	}
+
+// 	done := make(chan error, 1)
+// 	go func() {
+// 		done <- cmd.Wait()
+// 	}()
+
+// 	progressReadTicker := time.NewTicker(500 * time.Millisecond)
+// 	defer progressReadTicker.Stop()
+
+// 	for {
+// 		select {
+// 		case <-ctx.Done():
+// 			if cmd.Process != nil {
+// 				_ = cmd.Process.Kill()
+// 			}
+// 			<-done
+// 			return ctx.Err()
+
+// 		case err := <-done:
+// 			if err != nil {
+// 				return fmt.Errorf("command stopped with error: %w", err)
+// 			}
+// 			goto processResults // not ideomatic but talerated in this case
+
+// 		case <-progressReadTicker.C:
+// 			currentTime := extractCurrentOutTime(progressPath)
+// 			printProgressBar(currentTime / m.Duration)
+// 		}
+// 	}
+
+// processResults:
+// 	printProgressBar(100)
+// 	fmt.Println() // перевод строки после прогресс-бара
+
+// 	// Собираем пути к выходным файлам (все ключи, кроме "progress")
+// 	statFiles := []string{}
+// 	for key, filePath := range paths {
+// 		if key == progressFileKey {
+// 			continue
+// 		}
+// 		// Проверяем, что ключ – это номер аудиопотока (0,1,...)
+// 		if _, err := strconv.Atoi(key); err != nil {
+// 			continue
+// 		}
+// 		statFiles = append(statFiles, filePath)
+
+// 	}
+// 	slices.Sort(statFiles)
+
+// 	lm, err := streammap.ParseAstatFiles(statFiles)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to parse astats files: %w", err)
+// 	}
+
+// 	f, err := os.Create(paths[csvFileKey])
+// 	if err != nil {
+// 		return fmt.Errorf("failed to create result file: %w", err)
+// 	}
+// 	defer f.Close()
+// 	if err := lm.WriteWideCSV(f); err != nil {
+// 		return err
+// 	}
+// 	time.Sleep(time.Second)
+// 	for k, path := range paths {
+// 		if k == csvFileKey {
+// 			continue
+// 		}
+// 		f, _ := os.Create(path)
+// 		f.Close()
+// 		fmt.Println("delete", path, os.Remove(path))
+// 	}
+// 	return nil
+// }
+
 func (m *Media) executeAudioScanCommand(ctx context.Context, cmd *exec.Cmd, paths map[string]string) error {
-	// Извлекаем путь к файлу прогресса
 	progressPath, ok := paths[progressFileKey]
 	if !ok {
-		return fmt.Errorf("в карте paths отсутствует ключ 'progress'")
+		return fmt.Errorf("paths does not contain 'progress'")
 	}
 
-	// Запускаем процесс
+	fmt.Fprintf(os.Stderr, "run command: %v\n", fmt.Sprintf(strings.Join(cmd.Args, " ")))
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("не удалось запустить команду: %w", err)
+		return fmt.Errorf("failed to run command: %w", err)
 	}
 
-	// Канал для получения результата Wait()
+	// Wait for command completion in a separate goroutine
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
 	}()
 
-	// Тикер для периодического чтения прогресса
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	// Monitor progress and command completion
+	err := m.monitorCommandProgress(ctx, cmd, done, progressPath)
+	if err != nil {
+		return err
+	}
 
-	// Основной цикл: ждём завершения команды, отмены контекста или нового тика
+	// Command finished successfully – process results
+	printProgressBar(100)
+	fmt.Println() // newline after the progress bar
+
+	// Parse astats files and write CSV
+	if err := m.writeWideCSVFromStats(paths); err != nil {
+		return err
+	}
+
+	// Clean up temporary files (all except the CSV result)
+	m.cleanupTempFiles(paths)
+
+	return nil
+}
+
+// monitorCommandProgress watches the command's execution, kills it on context cancellation,
+// and updates the progress bar based on the progress file.
+func (m *Media) monitorCommandProgress(ctx context.Context, cmd *exec.Cmd, done <-chan error, progressPath string) error {
+	progressTicker := time.NewTicker(500 * time.Millisecond)
+	defer progressTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Контекст отменён – убиваем процесс
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
-			// Ожидаем завершения горутины с Wait, чтобы избежать зомби
 			<-done
 			return ctx.Err()
 
 		case err := <-done:
-			// Команда завершилась (успешно или с ошибкой)
+			// Command finished
 			if err != nil {
-				return fmt.Errorf("команда ffmpeg завершилась с ошибкой: %w", err)
+				return fmt.Errorf("command stopped with error: %w", err)
 			}
-			goto processResults // not ideomatic but talerated in this case
+			return nil // success
 
-		case <-ticker.C:
+		case <-progressTicker.C:
 			currentTime := extractCurrentOutTime(progressPath)
 			printProgressBar(currentTime / m.Duration)
 		}
 	}
+}
 
-processResults:
-	printProgressBar(100)
-	fmt.Println() // перевод строки после прогресс-бара
-
-	// Собираем пути к выходным файлам (все ключи, кроме "progress")
-	statFiles := []string{}
-	for key, filePath := range paths {
-		if key == progressFileKey {
-			continue
-		}
-		// Проверяем, что ключ – это номер аудиопотока (0,1,...)
-		if _, err := strconv.Atoi(key); err != nil {
-			continue
-		}
-		statFiles = append(statFiles, filePath)
-
-	}
-	slices.Sort(statFiles)
+// writeWideCSVFromStats collects all astats files (keys that are numeric stream indices),
+// parses them, and writes the wide CSV result.
+func (m *Media) writeWideCSVFromStats(paths map[string]string) error {
+	statFiles := m.collectStatFiles(paths)
 
 	lm, err := streammap.ParseAstatFiles(statFiles)
 	if err != nil {
 		return fmt.Errorf("failed to parse astats files: %w", err)
 	}
 
-	f, err := os.Create(paths[csvFileKey])
+	csvPath, ok := paths[csvFileKey]
+	if !ok {
+		return fmt.Errorf("paths does not contain CSV file key")
+	}
+
+	f, err := os.Create(csvPath)
 	if err != nil {
 		return fmt.Errorf("failed to create result file: %w", err)
 	}
 	defer f.Close()
+
 	if err := lm.WriteWideCSV(f); err != nil {
-		return err
+		return fmt.Errorf("failed to write CSV: %w", err)
 	}
-	time.Sleep(time.Second)
-	for k, path := range paths {
-		if k == csvFileKey {
+
+	if m.Meta == nil {
+		m.Meta = make(map[string]string)
+	}
+	m.Meta["astatsCSV"] = csvPath
+
+	return nil
+}
+
+// collectStatFiles returns a sorted slice of file paths whose keys are numeric strings
+// (representing audio stream indices), skipping the progress and CSV files.
+func (m *Media) collectStatFiles(paths map[string]string) []string {
+	var statFiles []string
+	for key, filePath := range paths {
+		if key == progressFileKey || key == csvFileKey {
 			continue
 		}
-		f, _ := os.Create(path)
-		f.Close()
-		fmt.Println("delete", path, os.Remove(path))
+		// Only accept keys that are valid integers (stream numbers)
+		if _, err := strconv.Atoi(key); err != nil {
+			continue
+		}
+		statFiles = append(statFiles, filePath)
 	}
-	return nil
+	slices.Sort(statFiles)
+	return statFiles
+}
+
+// cleanupTempFiles deletes all temporary files except the final CSV.
+// Errors are logged to stderr but do not stop the function.
+func (m *Media) cleanupTempFiles(paths map[string]string) {
+	for key, path := range paths {
+		if key == csvFileKey {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to remove %s: %v\n", path, err)
+		} else {
+			fmt.Println("delete", path)
+		}
+	}
 }
