@@ -4,12 +4,7 @@ go 1.26.1
 
 require (
 	github.com/Galdoba/appcontext v0.0.0-20260422164318-e9677748cb4c
-	lukechampine.com/blake3 v1.4.1
-)
-
-require (
-	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
-	gopkg.in/vansante/go-ffprobe.v2 v2.3.0 // indirect
+	gopkg.in/vansante/go-ffprobe.v2 v2.3.0
 )
 
 require (

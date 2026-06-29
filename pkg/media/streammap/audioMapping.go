@@ -261,7 +261,7 @@ func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 			if frameIdx < len(col.values) {
 				val = col.values[frameIdx]
 			} else {
-				val = ffmpegSilenceValue
+				// val = ffmpegSilenceValue
 			}
 			record = append(record, strconv.FormatFloat(val, 'f', 6, 64))
 		}
@@ -365,5 +365,55 @@ func LoudnessMapFromCSV(csvPath string) (*LoudnessMap, error) {
 		}
 	}
 
+	return lm, nil
+}
+
+// ParseAstatReaders работает аналогично ParseAstatFiles, но принимает
+// не пути к файлам, а map[int]io.Reader, где ключ — индекс аудиопотока.
+func ParseAstatReaders(readers map[int]io.Reader) (*LoudnessMap, error) {
+	lm := NewLoudnessMap()
+	dataRe := regexp.MustCompile(astatsLineExpression)
+
+	for streamIdx, r := range readers {
+
+		fmt.Fprintf(os.Stderr, "processing stream %d...%v\n", streamIdx, r)
+
+		scanner := bufio.NewScanner(r)
+		primaryKey := strconv.Itoa(streamIdx)
+
+		frameControlCounter := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+
+			if !strings.HasPrefix(line, astatsLineMarker) {
+				if err := assertFrameNumber(frameControlCounter, line); err != nil {
+					return nil, fmt.Errorf("stream %d: %w", streamIdx, err)
+				}
+				frameControlCounter++
+				continue
+			}
+
+			parts := dataRe.FindStringSubmatch(line)
+			if parts == nil || len(parts) != 4 {
+				return nil, fmt.Errorf("stream %d: %w", streamIdx, errInvalidLineFormat(line))
+			}
+			channel := parts[1]  // "1", "2", "Overall"
+			dataType := parts[2] // "Peak_level", "RMS_peak", ...
+			rawVal := parts[3]
+
+			val, err := parseValue(rawVal)
+			if err != nil {
+				return nil, fmt.Errorf("stream %d: failed to parse value %q: %w", streamIdx, line, err)
+			}
+
+			internalKey := channel + "." + dataType
+			lm.appendData(primaryKey, internalKey, val)
+		}
+		fmt.Println(frameControlCounter)
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("stream %d: read error: %w", streamIdx, err)
+		}
+		fmt.Fprintf(os.Stderr, "  ok\n")
+	}
 	return lm, nil
 }

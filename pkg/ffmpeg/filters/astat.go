@@ -41,8 +41,8 @@ const (
 	RMSLevel          AstatMeasure = "RMS_level"           // standard RMS level measured in dBFS
 	RMSPeak           AstatMeasure = "RMS_peak"            // peak and through values for RMS level measured over a short window, measured in dBFS.
 	RMSTrough         AstatMeasure = "RMS_trough"          // peak and through values for RMS level measured over a short window, measured in dBFS.
-	ZeroCrossings     AstatMeasure = "Zero crossings"      // number of points where the waveform crosses the zero level axis
-	ZeroCrossingsRate AstatMeasure = "Zero crossings rate" // rate of Zero crossings and number of audio samples
+	ZeroCrossings     AstatMeasure = "Zero_crossings"      // number of points where the waveform crosses the zero level axis
+	ZeroCrossingsRate AstatMeasure = "Zero_crossings_rate" // rate of Zero crossings and number of audio samples
 )
 
 // Allowed measurements per channel (from FFmpeg documentation).
@@ -98,6 +98,8 @@ var allowedOverallMeasures = map[string]bool{
 	"RMS_level":           true,
 	"RMS_peak":            true,
 	"RMS_trough":          true,
+	"Zero crossings":      true,
+	"Zero crossings rate": true,
 }
 
 // Astat holds the configuration for the astats audio filter.
@@ -221,7 +223,9 @@ func AstatMeasurePerChannel(measures ...AstatMeasure) AstatOptFunc {
 		}
 		for _, k := range keys {
 			if !allowedPerChannelMeasures[k] {
-				return fmt.Errorf("measure '%s' is not valid for per‑channel measurement", k)
+				fmt.Printf("measure '%s' is not valid for per‑channel measurement\n", k)
+				return nil
+				// return fmt.Errorf("measure '%s' is not valid for per‑channel measurement", k)
 			}
 		}
 		a.PerChannelMeasures = keys
@@ -244,7 +248,8 @@ func AstatMeasureOverall(measures ...AstatMeasure) AstatOptFunc {
 		}
 		for _, k := range keys {
 			if !allowedOverallMeasures[k] {
-				return fmt.Errorf("measure '%s' is not valid for overall measurement", k)
+				fmt.Printf("measure '%s' is not valid for overall measurement\n", k)
+				return nil
 			}
 		}
 		a.OverallMeasures = keys

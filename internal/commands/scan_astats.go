@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	scanastats "github.com/Galdoba/ffquery/internal/commands/scan_astats"
 	"github.com/Galdoba/ffquery/internal/infrastructure"
 	"github.com/Galdoba/ffquery/internal/infrastructure/config"
 	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
@@ -23,9 +24,11 @@ func ScanAstats() *cli.Command {
 		DefaultCommand: "",
 		Category:       "",
 		Commands:       []*cli.Command{},
-		// Flags: []cli.Flag{
-		// 	flags.AstatsMeasurments,
-		// },
+		Flags: []cli.Flag{
+			scanastats.MeasurmentsCombined,
+			scanastats.MeasurmentsPerChannel,
+			scanastats.MeasurmentsOverall,
+		},
 		Before:  nil,
 		After:   nil,
 		Action:  scanAstatsAction(),
@@ -35,21 +38,73 @@ func ScanAstats() *cli.Command {
 	return &cmd
 }
 
+var per_channel_metrics = []filters.AstatMeasure{
+	filters.RMSLevel,
+	filters.RMSPeak,
+	filters.RMSTrough,
+	filters.RMSDifference,
+	filters.MinLevel,
+	filters.PeakLevel,
+	filters.NoiseFloor,
+	filters.NoiseFloorCount,
+	filters.DCOffset,
+	filters.Entropy,
+	filters.FlatFactor,
+	filters.MaxDifference,
+	filters.MeanDifference,
+	filters.ZeroCrossings,
+	filters.ZeroCrossingsRate,
+	filters.BitDepth,
+}
+
+var overall_metrics = []filters.AstatMeasure{
+	filters.RMSLevel,
+	filters.RMSPeak,
+	filters.RMSTrough,
+	filters.RMSDifference,
+	filters.MinLevel,
+	filters.PeakLevel,
+	filters.NoiseFloor,
+	filters.NoiseFloorCount,
+	filters.DCOffset,
+	filters.Entropy,
+	filters.FlatFactor,
+	filters.MaxDifference,
+	filters.MeanDifference,
+	filters.BitDepth,
+}
+
 func scanAstatsAction() cli.ActionFunc {
 	return func(ctx context.Context, c *cli.Command) error {
 		inf := infrastructure.Init()
 		logger := inf.GetLogger()
 		errs := []error{}
-		// fmt.Printf("%v\n", c.StringSlice(scanastats.FlagMeasurmentsPerchannel))
+		fmt.Printf("%v\n", c.String(scanastats.FlagMeasurmentsPerchannel))
 		// return nil
 		mg, err := mediagroup.New(c.Args().Slice()...)
 		if err != nil {
 			return fmt.Errorf("failed to create mediagroup: %w", err)
 		}
+		perChannelMeasurments := []filters.AstatMeasure{}
+		overallMeasurments := []filters.AstatMeasure{}
+		switch c.String(scanastats.FlagMeasurmentsCombined) {
+		case "":
+			for s := range strings.SplitSeq(c.String(scanastats.FlagMeasurmentsPerchannel), ",") {
+				perChannelMeasurments = append(perChannelMeasurments, filters.AstatMeasure(s))
+			}
+			for s := range strings.SplitSeq(c.String(scanastats.FlagMeasurmentsOverall), ",") {
+				overallMeasurments = append(overallMeasurments, filters.AstatMeasure(s))
+			}
+		default:
+			for s := range strings.SplitSeq(c.String(scanastats.FlagMeasurmentsCombined), ",") {
+				perChannelMeasurments = append(perChannelMeasurments, filters.AstatMeasure(s))
+				overallMeasurments = append(overallMeasurments, filters.AstatMeasure(s))
+			}
+		}
+
 		for _, m := range mg.MediaFiles {
 			logger.Info("start scan", "file", m.Path)
-			defaultMeasurements := []filters.AstatMeasure{filters.RMSLevel, filters.PeakLevel}
-			if err := m.ScanAstats(context.Background(), defaultMeasurements, defaultMeasurements); err != nil {
+			if err := m.ScanAstats(context.Background(), perChannelMeasurments, overallMeasurments); err != nil {
 				errs = append(errs, fmt.Errorf("failed to scan file %s: %w", m.Path, err))
 				continue
 			}

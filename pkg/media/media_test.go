@@ -1,9 +1,12 @@
 package mediagroup
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"testing"
+
+	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
 )
 
 func TestNew(t *testing.T) {
@@ -13,7 +16,8 @@ func TestNew(t *testing.T) {
 	fmt.Println(err)
 	fmt.Println(mg)
 	fmt.Println(mg.MediaFiles[0])
-	err = mg.MediaFiles[0].ScanRmsLevels()
+	fltrs := []filters.AstatMeasure{filters.RMSLevel, filters.RMSPeak}
+	err = mg.MediaFiles[0].ScanAstats(context.Background(), fltrs, fltrs)
 	if err != nil {
 		log.Fatal(err)
 	}
