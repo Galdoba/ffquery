@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	scanastats "github.com/Galdoba/ffquery/internal/commands/scan_astats"
@@ -10,6 +11,7 @@ import (
 	"github.com/Galdoba/ffquery/internal/infrastructure/config"
 	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
 	mediagroup "github.com/Galdoba/ffquery/pkg/media"
+	"github.com/Galdoba/ffquery/pkg/progress"
 	"github.com/urfave/cli/v3"
 )
 
@@ -79,8 +81,7 @@ func scanAstatsAction() cli.ActionFunc {
 		inf := infrastructure.Init()
 		logger := inf.GetLogger()
 		errs := []error{}
-		fmt.Printf("%v\n", c.String(scanastats.FlagMeasurmentsPerchannel))
-		// return nil
+
 		mg, err := mediagroup.New(c.Args().Slice()...)
 		if err != nil {
 			return fmt.Errorf("failed to create mediagroup: %w", err)
@@ -104,7 +105,12 @@ func scanAstatsAction() cli.ActionFunc {
 
 		for _, m := range mg.MediaFiles {
 			logger.Info("start scan", "file", m.Path)
-			if err := m.ScanAstats(context.Background(), perChannelMeasurments, overallMeasurments); err != nil {
+			if err := m.ScanAstats(context.Background(),
+				mediagroup.WithPerChannelMeasures(perChannelMeasurments...),
+				mediagroup.WithOverallMeasures(overallMeasurments...),
+				mediagroup.WithProgressTracker(progress.WithTemplate(fmt.Sprintf("%v %v %v", progress.KeyElapsed, progress.KeyCurrent, progress.KeyPercent)),
+					progress.WithOutput(os.Stderr)),
+			); err != nil {
 				errs = append(errs, fmt.Errorf("failed to scan file %s: %w", m.Path, err))
 				continue
 			}

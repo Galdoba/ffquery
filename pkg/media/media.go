@@ -53,6 +53,7 @@ type SStream struct {
 	raw         ffprobe.Stream
 }
 
+// NewMedia creates a Media instance by probing the given file with ffprobe.
 func NewMedia(path string) (*Media, error) {
 	return newMedia(path)
 }

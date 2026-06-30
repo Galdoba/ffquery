@@ -24,146 +24,79 @@ const (
 	ffmpegSilenceValue       = -750.0
 )
 
-type ErrInvalidLineFormat error
-
-func errInvalidLineFormat(line string) error {
-	return fmt.Errorf("invalid line format: %q", line)
-}
+var (
+	ErrInvalidLineFormat = errors.New("invalid line format")
+	ErrFrameMismatch     = errors.New("frame number mismatch")
+)
 
 type LoudnessMap struct {
 	Data map[string]map[string][]float64
 }
 
-func (lm *LoudnessMap) appendData(primeKey, secondaryKey string, value float64) {
-	if lm.Data[primeKey] == nil {
-		lm.Data[primeKey] = make(map[string][]float64)
-	}
-	lm.Data[primeKey][secondaryKey] = append(lm.Data[primeKey][secondaryKey], value)
+func NewLoudnessMap() *LoudnessMap {
+	return &LoudnessMap{Data: make(map[string]map[string][]float64)}
 }
 
-// NewLoudnessMap создаёт пустую структуру.
-func NewLoudnessMap() *LoudnessMap {
-	return &LoudnessMap{
-		Data: make(map[string]map[string][]float64),
+func (lm *LoudnessMap) appendData(streamIdx, metricKey string, value float64) {
+	if lm.Data[streamIdx] == nil {
+		lm.Data[streamIdx] = make(map[string][]float64)
 	}
+	lm.Data[streamIdx][metricKey] = append(lm.Data[streamIdx][metricKey], value)
 }
 
 func NewAstatFileSuffix(streamIndex int) string {
 	return fmt.Sprintf("%s_%d.txt", astatsFileMarker, streamIndex)
 }
 
-// ParseASTATFiles принимает список путей к файлам и заполняет LoudnessMap.
-func ParseAstatFiles(filePaths []string) (*LoudnessMap, error) {
-	lm := NewLoudnessMap()
-
-	fileRe := regexp.MustCompile(astatsFilenameExpression)
-	dataRe := regexp.MustCompile(astatsLineExpression)
-
-	for _, path := range filePaths {
-		fmt.Fprintf(os.Stderr, "processing %s...", path)
-
-		scanner, err := newFileProcessor(path, fileRe, dataRe)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create scanner with context: %w", err)
-		}
-		if err := scanner.processAndFill(lm); err != nil {
-			return nil, fmt.Errorf("failed to process %s: %w", path, err)
-		}
-
-		fmt.Fprintf(os.Stderr, "  ok\n")
-	}
-	return lm, nil
-}
-
-type astatsProcessor struct {
-	scanner    *bufio.Scanner
-	reader     *os.File
-	dataRe     *regexp.Regexp
-	primaryKey string
-	filepath   string
-}
-
-func newFileProcessor(path string, fileRe, dataRe *regexp.Regexp) (*astatsProcessor, error) {
+func extractStreamIndexFromPath(path string) (string, error) {
 	base := filepath.Base(path)
-	match := fileRe.FindStringSubmatch(base)
+	re := regexp.MustCompile(astatsFilenameExpression)
+	match := re.FindStringSubmatch(base)
 	if match == nil {
-		return nil, fmt.Errorf("failed to extract stream index: filename does not match template (*%s): %s", astatsFilenameExpression, base)
+		return "", fmt.Errorf("filename %q does not match expected pattern %q", base, astatsFilenameExpression)
 	}
-	primaryKey := match[1]
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-
-	scanner := bufio.NewScanner(f)
-	sc := astatsProcessor{
-		scanner:    scanner,
-		reader:     f,
-		dataRe:     dataRe,
-		primaryKey: primaryKey,
-		filepath:   path,
-	}
-	return &sc, nil
+	return match[1], nil
 }
 
-func (sc *astatsProcessor) processAndFill(lm *LoudnessMap) error {
-	frameControlCounter := 0
-	for sc.scanner.Scan() {
-		line := sc.scanner.Text()
-
-		if !strings.HasPrefix(line, astatsLineMarker) {
-			if err := assertFrameNumber(frameControlCounter, line); err != nil {
+// parseStream reads ASTATS lines and populates the LoudnessMap.
+// primaryKey is the stream index.
+func parseStream(scanner *bufio.Scanner, primaryKey string, dataRe *regexp.Regexp, lm *LoudnessMap) error {
+	var currentFrame int = -1
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, astatsLineMarker) {
+			// metric line
+			channel, dataType, val, err := parseAstatLine(line, dataRe)
+			if err != nil {
 				return err
 			}
-			frameControlCounter++
+			metricKey := channel + "." + dataType
+			lm.appendData(primaryKey, metricKey, val)
 			continue
 		}
-
-		parts := sc.dataRe.FindStringSubmatch(line)
-		if parts == nil || len(parts) != 4 {
-			return errInvalidLineFormat(line)
-		}
-		channel := parts[1]  // "1", "2", "Overall"
-		dataType := parts[2] // "Peak_level", "RMS_peak", ...
-		rawVal := parts[3]
-
-		val, err := parseValue(rawVal)
+		// frame line expected
+		frame, err := extractFrameNumber(line)
 		if err != nil {
-			return fmt.Errorf("failed to parse value in %s: %q: %w", sc.filepath, line, err)
+			return fmt.Errorf("expected frame line, got: %q", line)
 		}
-
-		internalKey := channel + "." + dataType
-		lm.appendData(sc.primaryKey, internalKey, val)
+		if currentFrame+1 != frame {
+			return fmt.Errorf("%w: expected frame %d, got %d", ErrFrameMismatch, currentFrame+1, frame)
+		}
+		currentFrame = frame
 	}
-
-	if err := sc.scanner.Err(); err != nil {
-		return fmt.Errorf("failed to read file %s: %w", sc.filepath, err)
-	}
-	sc.reader.Close()
-
-	return nil
+	return scanner.Err()
 }
 
-var frameRe = regexp.MustCompile(frameExpression)
-
-func extractFrameNumber(line string) (int, error) {
-	matches := frameRe.FindStringSubmatch(line)
-	if len(matches) < 2 {
-		return 0, fmt.Errorf("номер кадра не найден в строке: %q", line)
+func parseAstatLine(line string, re *regexp.Regexp) (channel, dataType string, value float64, err error) {
+	parts := re.FindStringSubmatch(line)
+	if parts == nil || len(parts) != 4 {
+		return "", "", 0, fmt.Errorf("%w: %q", ErrInvalidLineFormat, line)
 	}
-	return strconv.Atoi(matches[1])
-}
-
-func assertFrameNumber(expectedFrame int, line string) error {
-	frame, err := extractFrameNumber(line)
+	val, err := parseValue(parts[3])
 	if err != nil {
-		return fmt.Errorf("unknown line format: %q", line)
+		return "", "", 0, fmt.Errorf("failed to parse value in %q: %w", line, err)
 	}
-	if frame != expectedFrame {
-		return fmt.Errorf("unexpected frame number (%d): expect %d", frame, expectedFrame)
-	}
-	return nil
+	return parts[1], parts[2], val, nil
 }
 
 func parseValue(s string) (float64, error) {
@@ -172,7 +105,6 @@ func parseValue(s string) (float64, error) {
 	if low == "inf" || low == "+inf" || low == "-inf" || low == "nan" {
 		return ffmpegSilenceValue, nil
 	}
-
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return ffmpegSilenceValue, fmt.Errorf("failed to parse %q: %w", s, err)
@@ -180,44 +112,68 @@ func parseValue(s string) (float64, error) {
 	return val, nil
 }
 
-// csvColumn describes a single output column: its header and the data slice.
-type csvColumn struct {
-	header string
-	values []float64
+func extractFrameNumber(line string) (int, error) {
+	re := regexp.MustCompile(frameExpression)
+	matches := re.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return 0, errors.New("frame number not found")
+	}
+	return strconv.Atoi(matches[1])
 }
 
-// WriteWideCSV writes the LoudnessMap data as a wide CSV.
+// ParseAstatStreams reads ASTATS data from a set of named readers.
+func ParseAstatStreams(streams map[string]io.Reader) (*LoudnessMap, error) {
+	lm := NewLoudnessMap()
+	dataRe := regexp.MustCompile(astatsLineExpression)
+	streamCount := 1
+
+	for streamIdx, r := range streams {
+		streamCount++
+		scanner := bufio.NewScanner(r)
+		if err := parseStream(scanner, streamIdx, dataRe, lm); err != nil {
+			return nil, fmt.Errorf("stream %s: %w", streamIdx, err)
+		}
+	}
+	return lm, nil
+}
+
+// WriteWideCSV writes the LoudnessMap as a wide CSV.
 func (lm *LoudnessMap) WriteWideCSV(w io.Writer) error {
 	if lm == nil || lm.Data == nil {
-		return fmt.Errorf("LoudnessMap is nil or empty")
+		return errors.New("LoudnessMap is nil or empty")
 	}
 
 	columns, totalFrames := lm.collectCSVColumns()
-
 	writer := csv.NewWriter(w)
 
 	if err := writeCSVHeader(writer, columns); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
-
 	if err := writeCSVRows(writer, columns, totalFrames); err != nil {
 		return err
 	}
 
 	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return fmt.Errorf("failed to flush csv: %w", err)
-	}
-	return nil
+	return writer.Error()
 }
 
-// collectCSVColumns extracts all columns from the LoudnessMap,
-// sorts them by header, and returns the sorted slice together with
-// the maximum number of frames (the length of the longest data slice).
+func (lm *LoudnessMap) ToCSV() (string, error) {
+	var buf strings.Builder
+	if err := lm.WriteWideCSV(&buf); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+type csvColumn struct {
+	header string
+	values []float64
+}
+
 func (lm *LoudnessMap) collectCSVColumns() ([]csvColumn, int) {
 	var columns []csvColumn
-	for streamIdx, metricsMap := range lm.Data {
-		for metricKey, vals := range metricsMap {
+	for streamIdx, metrics := range lm.Data {
+		for metricKey, vals := range metrics {
 			columns = append(columns, csvColumn{
 				header: fmt.Sprintf("stream_%s_%s", streamIdx, metricKey),
 				values: vals,
@@ -229,7 +185,7 @@ func (lm *LoudnessMap) collectCSVColumns() ([]csvColumn, int) {
 		return strings.Compare(a.header, b.header)
 	})
 
-	var totalFrames int
+	totalFrames := 0
 	for _, col := range columns {
 		if len(col.values) > totalFrames {
 			totalFrames = len(col.values)
@@ -238,7 +194,6 @@ func (lm *LoudnessMap) collectCSVColumns() ([]csvColumn, int) {
 	return columns, totalFrames
 }
 
-// writeCSVHeader writes the header row to the CSV writer.
 func writeCSVHeader(w *csv.Writer, columns []csvColumn) error {
 	headers := []string{"frame", "time"}
 	for _, col := range columns {
@@ -247,7 +202,6 @@ func writeCSVHeader(w *csv.Writer, columns []csvColumn) error {
 	return w.Write(headers)
 }
 
-// writeCSVRows writes all data rows for the given columns and frame count.
 func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 	for frameIdx := range totalFrames {
 		timeSec := float64(frameIdx) * frameFactor
@@ -261,88 +215,37 @@ func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 			if frameIdx < len(col.values) {
 				val = col.values[frameIdx]
 			} else {
-				// val = ffmpegSilenceValue
+				val = ffmpegSilenceValue
 			}
 			record = append(record, strconv.FormatFloat(val, 'f', 6, 64))
 		}
 
 		if err := w.Write(record); err != nil {
-			return fmt.Errorf("failed to write record for frame %d: %w", frameIdx, err)
+			return fmt.Errorf("failed to write CSV row for frame %d: %w", frameIdx, err)
 		}
 	}
 	return nil
 }
 
-func (lm *LoudnessMap) ToCSV() (string, error) {
-	var buf strings.Builder
-	if err := lm.WriteWideCSV(&buf); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
-
-// columnMapping describes one output column read from the CSV.
+// CSV reading helpers (unchanged, but included for completeness)
 type columnMapping struct {
 	streamIdx string
-	metricKey string // e.g. "1.RMS_peak"
+	metricKey string
 }
 
-// parseCSVHeader validates the header row and extracts column mappings.
-func parseCSVHeader(header []string) ([]columnMapping, error) {
-	if len(header) < 2 || header[0] != "frame" || header[1] != "time" {
-		return nil, fmt.Errorf("некорректный заголовок: ожидались 'frame', 'time', а получено %v", header)
-	}
-
-	cols := make([]columnMapping, 0, len(header)-2)
-	for i := 2; i < len(header); i++ {
-		colName := header[i]
-		// expected format: "stream_<idx>_<metricKey>"
-		parts := strings.SplitN(colName, "_", 3)
-		if len(parts) != 3 || parts[0] != "stream" {
-			return nil, fmt.Errorf("неверный формат колонки %q: ожидается 'stream_<idx>_<metricKey>'", colName)
-		}
-		cols = append(cols, columnMapping{
-			streamIdx: parts[1],
-			metricKey: parts[2],
-		})
-	}
-	return cols, nil
-}
-
-// populateFromCSVRow reads one data record and appends its values to the map.
-func (lm *LoudnessMap) populateFromCSVRow(record []string, cols []columnMapping) error {
-	if len(record) < 2 {
-		return fmt.Errorf("строка слишком короткая: %v", record)
-	}
-
-	for idx, col := range cols {
-		var val float64 = ffmpegSilenceValue
-		if idx+2 < len(record) {
-			var err error
-			val, err = parseValue(record[idx+2])
-			if err != nil {
-				return fmt.Errorf("ошибка парсинга значения в строке %v, колонка %q: %w", record, col.metricKey, err)
-			}
-		}
-		lm.appendData(col.streamIdx, col.metricKey, val)
-	}
-	return nil
-}
-
-// LoudnessMapFromCSV reconstructs a LoudnessMap from a CSV file.
 func LoudnessMapFromCSV(csvPath string) (*LoudnessMap, error) {
 	file, err := os.Open(csvPath)
 	if err != nil {
-		return nil, fmt.Errorf("не удалось открыть файл %s: %w", csvPath, err)
+		return nil, fmt.Errorf("failed to open CSV file %s: %w", csvPath, err)
 	}
 	defer file.Close()
 
 	reader := csv.NewReader(file)
-	reader.FieldsPerRecord = -1 // allow variable number of fields
+	reader.FieldsPerRecord = -1
 
 	header, err := reader.Read()
 	if err != nil {
-		return nil, fmt.Errorf("ошибка чтения заголовка: %w", err)
+		return nil, fmt.Errorf("failed to read CSV header: %w", err)
 	}
 
 	columns, err := parseCSVHeader(header)
@@ -353,67 +256,54 @@ func LoudnessMapFromCSV(csvPath string) (*LoudnessMap, error) {
 	lm := NewLoudnessMap()
 	for {
 		record, err := reader.Read()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return nil, fmt.Errorf("ошибка чтения строки: %w", err)
+		if errors.Is(err, io.EOF) {
+			break
 		}
-
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CSV record: %w", err)
+		}
 		if err := lm.populateFromCSVRow(record, columns); err != nil {
 			return nil, err
 		}
 	}
-
 	return lm, nil
 }
 
-// ParseAstatReaders работает аналогично ParseAstatFiles, но принимает
-// не пути к файлам, а map[int]io.Reader, где ключ — индекс аудиопотока.
-func ParseAstatReaders(readers map[int]io.Reader) (*LoudnessMap, error) {
-	lm := NewLoudnessMap()
-	dataRe := regexp.MustCompile(astatsLineExpression)
-
-	for streamIdx, r := range readers {
-
-		fmt.Fprintf(os.Stderr, "processing stream %d...%v\n", streamIdx, r)
-
-		scanner := bufio.NewScanner(r)
-		primaryKey := strconv.Itoa(streamIdx)
-
-		frameControlCounter := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-
-			if !strings.HasPrefix(line, astatsLineMarker) {
-				if err := assertFrameNumber(frameControlCounter, line); err != nil {
-					return nil, fmt.Errorf("stream %d: %w", streamIdx, err)
-				}
-				frameControlCounter++
-				continue
-			}
-
-			parts := dataRe.FindStringSubmatch(line)
-			if parts == nil || len(parts) != 4 {
-				return nil, fmt.Errorf("stream %d: %w", streamIdx, errInvalidLineFormat(line))
-			}
-			channel := parts[1]  // "1", "2", "Overall"
-			dataType := parts[2] // "Peak_level", "RMS_peak", ...
-			rawVal := parts[3]
-
-			val, err := parseValue(rawVal)
-			if err != nil {
-				return nil, fmt.Errorf("stream %d: failed to parse value %q: %w", streamIdx, line, err)
-			}
-
-			internalKey := channel + "." + dataType
-			lm.appendData(primaryKey, internalKey, val)
-		}
-		fmt.Println(frameControlCounter)
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("stream %d: read error: %w", streamIdx, err)
-		}
-		fmt.Fprintf(os.Stderr, "  ok\n")
+func parseCSVHeader(header []string) ([]columnMapping, error) {
+	if len(header) < 2 || header[0] != "frame" || header[1] != "time" {
+		return nil, fmt.Errorf("invalid CSV header: expected 'frame','time', got %v", header)
 	}
-	return lm, nil
+
+	cols := make([]columnMapping, 0, len(header)-2)
+	for i := 2; i < len(header); i++ {
+		colName := header[i]
+		parts := strings.SplitN(colName, "_", 3)
+		if len(parts) != 3 || parts[0] != "stream" {
+			return nil, fmt.Errorf("invalid column name %q: expected 'stream_<idx>_<metricKey>'", colName)
+		}
+		cols = append(cols, columnMapping{
+			streamIdx: parts[1],
+			metricKey: parts[2],
+		})
+	}
+	return cols, nil
+}
+
+func (lm *LoudnessMap) populateFromCSVRow(record []string, cols []columnMapping) error {
+	if len(record) < 2 {
+		return fmt.Errorf("CSV record too short: %v", record)
+	}
+
+	for idx, col := range cols {
+		val := ffmpegSilenceValue
+		if idx+2 < len(record) {
+			var err error
+			val, err = parseValue(record[idx+2])
+			if err != nil {
+				return fmt.Errorf("failed to parse value for column %q in record %v: %w", col.metricKey, record, err)
+			}
+		}
+		lm.appendData(col.streamIdx, col.metricKey, val)
+	}
+	return nil
 }
