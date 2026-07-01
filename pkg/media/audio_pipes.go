@@ -94,8 +94,8 @@ func (m *Media) executePipeScan(ctx context.Context, scan *scanConfig) error {
 	fmt.Fprintf(os.Stderr, "run command: %v\n", strings.Join(scan.cmd.Args, " "))
 
 	// Запускаем трекер прогресса после вывода команды
-	if scan.pr != nil {
-		scan.pr.Start()
+	if scan.progressTracker != nil {
+		scan.progressTracker.Start()
 	}
 
 	if err := scan.cmd.Start(); err != nil {
@@ -111,15 +111,13 @@ func (m *Media) executePipeScan(ctx context.Context, scan *scanConfig) error {
 	if !ok {
 		return errors.New("progress pipe reader missing")
 	}
-	if err := trackProgressFromPipe(ctx, progressReader, m.Duration, done, scan.pr); err != nil {
+	if err := trackProgressFromPipe(ctx, progressReader, m.Duration, done, scan.progressTracker); err != nil {
 		fmt.Fprintf(os.Stderr, "=== ffmpeg output ===\n%s\n===================\n", stderrBuf.String())
 		return err
 	}
 
-	// Завершаем трекер
-	if scan.pr != nil {
-		scan.pr.Done()
-		fmt.Fprintln(os.Stderr)
+	if scan.progressTracker != nil {
+		scan.progressTracker.Done()
 	}
 	res := <-parsedCh
 	if res.err != nil {

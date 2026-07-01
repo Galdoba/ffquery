@@ -80,11 +80,10 @@ func (m *Media) executeFileScan(ctx context.Context, scan *scanConfig) error {
 	var stderrBuf bytes.Buffer
 	scan.cmd.Stderr = &stderrBuf
 	scan.cmd.Stdout = &stderrBuf
-	fmt.Fprintf(os.Stderr, "run command: %v\n", strings.Join(scan.cmd.Args, " "))
+	fmt.Fprintf(os.Stderr, "run command: \n%v\n", strings.Join(scan.cmd.Args, " "))
 
-	// Запускаем трекер прогресса после вывода команды
-	if scan.pr != nil {
-		scan.pr.Start()
+	if scan.progressTracker != nil {
+		scan.progressTracker.Start()
 	}
 
 	if err := scan.cmd.Start(); err != nil {
@@ -99,26 +98,18 @@ func (m *Media) executeFileScan(ctx context.Context, scan *scanConfig) error {
 		return err
 	}
 
-	// Завершаем прогресс-бар (если есть)
-	if scan.pr != nil {
-		// fmt.Println("done progress")
-		scan.pr.Done()
-		// fmt.Println("close progress")
-		scan.pr.Close()
-		// time.Sleep(time.Millisecond * 15)
+	if scan.progressTracker != nil {
+		scan.progressTracker.Done()
+		scan.progressTracker.Close()
 	}
-	// fmt.Println("parse")
 	lm, err := m.parseAstatFiles(scan.output.Paths)
 	if err != nil {
 		return fmt.Errorf("parsing astats files: %w", err)
 	}
-	// fmt.Println("write")
 	if err := m.writeWideCSVFromLoudnessMap(lm, scan.output.CSVPath); err != nil {
 		return err
 	}
-	// fmt.Println("clean")
 	m.cleanupTempFiles(scan.output.Paths, scan.output.CSVPath)
-	// fmt.Println("end")
 	return nil
 }
 
@@ -174,8 +165,8 @@ func (m *Media) monitorProgressFromFile(ctx context.Context, scan *scanConfig, d
 			us, err := readLastOutTimeUs(progressPath)
 			if err == nil && us >= 0 {
 				pct := usToPercent(us, m.Duration)
-				if scan.pr != nil {
-					scan.pr.SetPct(pct)
+				if scan.progressTracker != nil {
+					scan.progressTracker.SetPct(pct)
 				}
 			}
 		}

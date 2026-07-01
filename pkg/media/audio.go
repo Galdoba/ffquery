@@ -44,39 +44,39 @@ type audioScanOutputs struct {
 }
 
 type scanConfig struct {
-	Streams    []AudioStreamInfo
-	PerChannel []filters.AstatMeasure
-	Overall    []filters.AstatMeasure
-	Dir        string
-	Prefix     string
-	CSVPath    string
-	InputPath  string
-	pr         *progress.Tracker
-	cmd        *exec.Cmd
-	output     *audioScanOutputs
+	Streams         []AudioStreamInfo
+	PerChannel      []filters.AstatMeasure
+	Overall         []filters.AstatMeasure
+	Dir             string
+	Prefix          string
+	CSVPath         string
+	InputPath       string
+	progressTracker *progress.Tracker
+	cmd             *exec.Cmd
+	output          *audioScanOutputs
 }
 
 type ScanOption func(*scanConfig) error
 
 func WithPerChannelMeasures(measures ...filters.AstatMeasure) ScanOption {
-	return func(sc *scanConfig) error {
-		sc.PerChannel = measures
+	return func(scan *scanConfig) error {
+		scan.PerChannel = measures
 		return nil
 	}
 }
 
 func WithOverallMeasures(measures ...filters.AstatMeasure) ScanOption {
-	return func(sc *scanConfig) error {
-		sc.Overall = measures
+	return func(scan *scanConfig) error {
+		scan.Overall = measures
 		return nil
 	}
 }
 
 // WithProgressTracker sets an optional progress tracker. If opts are empty, no tracker is used.
 func WithProgressTracker(opts ...progress.Option) ScanOption {
-	return func(sc *scanConfig) error {
+	return func(scan *scanConfig) error {
 		if len(opts) > 0 {
-			sc.pr = progress.NewTracker(opts...)
+			scan.progressTracker = progress.NewTracker(opts...)
 		}
 		return nil
 	}
@@ -186,7 +186,6 @@ func setChannelTags(r ffprobe.Stream) []string {
 
 // executeAudioScanCommand dispatches to the correct execution mode.
 func (m *Media) executeAudioScanCommand(ctx context.Context, scan *scanConfig) error {
-	// Если трекер есть и работает автоматически, он сам будет обновляться по таймеру.
 	if scan.output.Mode == "pipes" {
 		return m.executePipeScan(ctx, scan)
 	}
@@ -207,16 +206,6 @@ func usToPercent(us int64, totalSeconds float64) float64 {
 	}
 	return (float64(us) / microsPerSecond / totalSeconds) * percentMultiplier
 }
-
-// finishProgress marks the progress tracker as done and prints a newline if the tracker is in use.
-// func finishProgress(pr *progress.Tracker) {
-// 	if pr != nil {
-// 		pr.Done()
-// 		// Трекер с настройкой WithEndSeparation(false) не печатает перевод строки,
-// 		// поэтому добавляем его вручную для чистоты вывода.
-// 		fmt.Fprintln(os.Stderr)
-// 	}
-// }
 
 func (m *Media) writeWideCSVFromLoudnessMap(lm *streammap.LoudnessMap, csvPath string) error {
 	f, err := os.Create(csvPath)

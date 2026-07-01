@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	scanastats "github.com/Galdoba/ffquery/internal/commands/scan_astats"
 	"github.com/Galdoba/ffquery/internal/infrastructure"
@@ -108,8 +109,11 @@ func scanAstatsAction() cli.ActionFunc {
 			if err := m.ScanAstats(context.Background(),
 				mediagroup.WithPerChannelMeasures(perChannelMeasurments...),
 				mediagroup.WithOverallMeasures(overallMeasurments...),
-				mediagroup.WithProgressTracker(progress.WithTemplate(fmt.Sprintf("%v %v %v", progress.KeyElapsed, progress.KeyCurrent, progress.KeyPercent)),
-					progress.WithOutput(os.Stderr)),
+				mediagroup.WithProgressTracker(
+					progress.WithTemplate(fmt.Sprintf("scanning: %s %s  elapsed: %s", progress.KeyBar, progress.KeyPercent, progress.KeyElapsed)),
+					progress.WithOutput(os.Stderr),
+					progress.WithTimeFormatter(hhmmss),
+				),
 			); err != nil {
 				errs = append(errs, fmt.Errorf("failed to scan file %s: %w", m.Path, err))
 				continue
@@ -133,4 +137,19 @@ func errorReport(errs ...error) error {
 		fmt.Fprintf(&s, "  %v\n", err)
 	}
 	return fmt.Errorf("%s", s.String())
+}
+
+func hhmmss(d time.Duration) string {
+	sign := ""
+	if d < 0 {
+		sign = "-"
+		d = -d
+	}
+	totalSec := int64(d / time.Second)
+
+	hours := totalSec / 3600
+	minutes := (totalSec % 3600) / 60
+	seconds := totalSec % 60
+
+	return fmt.Sprintf("%s%02d:%02d:%02d", sign, hours, minutes, seconds)
 }
