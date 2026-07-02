@@ -72,7 +72,7 @@ func (scanCmd *scanConfig) generatePipeCommand() error {
 	}
 
 	cmd.Args = append(cmd.Args, "-i", scanCmd.InputPath,
-		"-filter_complex", strings.Join(filterParts, ";"))
+		"-filter_complex", joinFilterComplex(filterParts...))
 	cmd.Args = append(cmd.Args, mapArgs...)
 	cmd.Args = append(cmd.Args, "-f", "null", "-")
 
@@ -84,6 +84,10 @@ func (scanCmd *scanConfig) generatePipeCommand() error {
 	scanCmd.cmd = cmd
 	scanCmd.output = out
 	return nil
+}
+
+func joinFilterComplex(fcParts ...string) string {
+	return strings.Join(fcParts, ";")
 }
 
 // executePipeScan runs the ffmpeg command, monitors progress and parses astats from pipes.
@@ -118,7 +122,9 @@ func (m *Media) executePipeScan(ctx context.Context, scan *scanConfig) error {
 
 	if scan.progressTracker != nil {
 		scan.progressTracker.Done()
+		scan.progressTracker.Close()
 	}
+
 	res := <-parsedCh
 	if res.err != nil {
 		return fmt.Errorf("astats parsing: %w", res.err)

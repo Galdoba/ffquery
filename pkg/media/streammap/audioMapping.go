@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -122,19 +124,58 @@ func extractFrameNumber(line string) (int, error) {
 }
 
 // ParseAstatStreams reads ASTATS data from a set of named readers.
-func ParseAstatStreams(streams map[string]io.Reader) (*LoudnessMap, error) {
-	lm := NewLoudnessMap()
-	dataRe := regexp.MustCompile(astatsLineExpression)
-	streamCount := 1
-
-	for streamIdx, r := range streams {
-		streamCount++
-		scanner := bufio.NewScanner(r)
-		if err := parseStream(scanner, streamIdx, dataRe, lm); err != nil {
-			return nil, fmt.Errorf("stream %s: %w", streamIdx, err)
+// Merge safely integrates data from another LoudnessMap.
+// It assumes stream indices are disjoint across different calls.
+func (lm *LoudnessMap) Merge(other *LoudnessMap) {
+	for streamIdx, metrics := range other.Data {
+		if lm.Data[streamIdx] == nil {
+			lm.Data[streamIdx] = metrics
+		} else {
+			maps.Copy(lm.Data[streamIdx], metrics)
 		}
 	}
-	return lm, nil
+}
+
+// ParseAstatStreams reads ASTATS data from a set of named readers concurrently.
+// This avoids deadlocks when readers are backed by OS pipes (ffmpeg writes to all pipes simultaneously).
+func ParseAstatStreams(streams map[string]io.Reader) (*LoudnessMap, error) {
+	dataRe := regexp.MustCompile(astatsLineExpression)
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		finalLM = NewLoudnessMap()
+		errs    []error
+	)
+
+	for streamIdx, r := range streams {
+		wg.Add(1)
+		go func(idx string, reader io.Reader) {
+			defer wg.Done()
+
+			// each goroutine builds its own map to avoid contention
+			lm := NewLoudnessMap()
+			scanner := bufio.NewScanner(reader)
+			if err := parseStream(scanner, idx, dataRe, lm); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("stream %s: %w", idx, err))
+				mu.Unlock()
+				return
+			}
+
+			// merge the local result into the global map under lock
+			mu.Lock()
+			finalLM.Merge(lm)
+			mu.Unlock()
+		}(streamIdx, r)
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("parsing streams: %w", errors.Join(errs...))
+	}
+	return finalLM, nil
 }
 
 // WriteWideCSV writes the LoudnessMap as a wide CSV.

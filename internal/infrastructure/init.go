@@ -48,11 +48,11 @@ func New() (Infrastructure, error) {
 
 	mh := slog.NewMultiHandler(
 		slog.NewJSONHandler(f, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
+			Level: slog.LevelInfo,
 		}),
-		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: slog.LevelDebug,
-		}),
+		// slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		// 	Level: slog.LevelDebug,
+		// }),
 	)
 
 	logger := slog.New(mh)
