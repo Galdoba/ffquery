@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +18,8 @@ import (
 	"github.com/Galdoba/ffquery/pkg/progress"
 )
 
-// generatePipeCommand builds an ffmpeg command that communicates via pipes.
+// generatePipeCommand builds an ffmpeg command that communicates via pipes,
+// producing both total and speech astats data for each audio stream.
 func (scanCmd *scanConfig) generatePipeCommand() error {
 	out := &audioScanOutputs{
 		Mode:        "pipes",
@@ -40,20 +40,31 @@ func (scanCmd *scanConfig) generatePipeCommand() error {
 	cmd.Args = append(cmd.Args, "-progress", "pipe:3")
 	cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
 
-	// Stream pipes (fd 4+)
 	var filterParts []string
 	var mapArgs []string
-	for i, s := range scanCmd.Streams {
-		fd := 4 + i
-		streamTag := fmt.Sprintf("stream_%d", s.Index)
 
-		pr, pw, err := os.Pipe()
+	for i, s := range scanCmd.Streams {
+		// Allocate two file descriptors per stream: total and speech
+		fdTotal := 4 + 2*i
+		fdSpeech := 5 + 2*i
+
+		streamIdx := fmt.Sprintf("%d", s.Index)
+
+		// Create pipes for total and speech
+		prTotal, pwTotal, err := os.Pipe()
 		if err != nil {
-			return fmt.Errorf("stream %d pipe: %w", s.Index, err)
+			return fmt.Errorf("stream %d total pipe: %w", s.Index, err)
 		}
-		out.PipeReaders[fmt.Sprintf("%d", s.Index)] = pr
-		writers = append(writers, pw)
-		cmd.ExtraFiles = append(cmd.ExtraFiles, pw)
+		prSpeech, pwSpeech, err := os.Pipe()
+		if err != nil {
+			return fmt.Errorf("stream %d speech pipe: %w", s.Index, err)
+		}
+
+		out.PipeReaders[streamIdx+"_total"] = prTotal
+		out.PipeReaders[streamIdx+"_speech"] = prSpeech
+
+		writers = append(writers, pwTotal, pwSpeech)
+		cmd.ExtraFiles = append(cmd.ExtraFiles, pwTotal, pwSpeech)
 
 		astat, err := filters.NewAstat(
 			filters.AstatMetadata(true),
@@ -65,10 +76,24 @@ func (scanCmd *scanConfig) generatePipeCommand() error {
 			return fmt.Errorf("creating astat filter for stream %d: %w", s.Index, err)
 		}
 
+		tagAll := fmt.Sprintf("all_%d", s.Index)
+		tagSpeech := fmt.Sprintf("speech_%d", s.Index)
+		tagTotalOut := fmt.Sprintf("total_out_%d", s.Index)
+		tagSpeechOut := fmt.Sprintf("speech_out_%d", s.Index)
+
+		// asplit into two chains, then total and bandpass+speech
 		filterParts = append(filterParts,
-			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=4:file='pipe\\:%d'[%s]",
-				s.Index, s.IntervalSamples, astat.String(), fd, streamTag))
-		mapArgs = append(mapArgs, "-map", fmt.Sprintf("[%s]", streamTag))
+			fmt.Sprintf("[0:a:%d]asplit=2[%s][%s]", s.Index, tagAll, tagSpeech),
+			fmt.Sprintf("[%s]asetnsamples=%d,%s,ametadata=mode=4:file='pipe\\:%d'[%s]",
+				tagAll, s.IntervalSamples, astat.String(), fdTotal, tagTotalOut),
+			fmt.Sprintf("[%s]bandpass=f=300:w=3400,asetnsamples=%d,%s,ametadata=mode=4:file='pipe\\:%d'[%s]",
+				tagSpeech, s.IntervalSamples, astat.String(), fdSpeech, tagSpeechOut),
+		)
+
+		mapArgs = append(mapArgs,
+			"-map", fmt.Sprintf("[%s]", tagTotalOut),
+			"-map", fmt.Sprintf("[%s]", tagSpeechOut),
+		)
 	}
 
 	cmd.Args = append(cmd.Args, "-i", scanCmd.InputPath,
@@ -97,7 +122,6 @@ func (m *Media) executePipeScan(ctx context.Context, scan *scanConfig) error {
 	scan.cmd.Stdout = &stderrBuf
 	fmt.Fprintf(os.Stderr, "run command: %v\n", strings.Join(scan.cmd.Args, " "))
 
-	// Запускаем трекер прогресса после вывода команды
 	if scan.progressTracker != nil {
 		scan.progressTracker.Start()
 	}
@@ -132,7 +156,7 @@ func (m *Media) executePipeScan(ctx context.Context, scan *scanConfig) error {
 	return m.writeWideCSVFromLoudnessMap(res.lm, scan.output.CSVPath)
 }
 
-// parseAstatPipes extracts non‑progress pipe readers, feeds them to ParseAstatStreams in a goroutine.
+// parseAstatPipes extracts non-progress pipe readers and feeds them to ParseAstatStreams in a goroutine.
 func parseAstatPipes(readers map[string]io.ReadCloser) chan struct {
 	lm  *streammap.LoudnessMap
 	err error
@@ -147,9 +171,7 @@ func parseAstatPipes(readers map[string]io.ReadCloser) chan struct {
 			if k == progressFileKey {
 				continue
 			}
-			if _, err := strconv.Atoi(k); err != nil {
-				continue
-			}
+			// All remaining keys (e.g., "0_total", "0_speech") are astats pipes
 			pipeMap[k] = r
 		}
 		lm, err := streammap.ParseAstatStreams(pipeMap)
@@ -161,7 +183,7 @@ func parseAstatPipes(readers map[string]io.ReadCloser) chan struct {
 	return ch
 }
 
-// trackProgressFromPipe обновляет трекер прогресса (если он не nil) и возвращает ошибку, если контекст отменён или ffmpeg завершился с ошибкой.
+// trackProgressFromPipe updates the progress tracker (if not nil) and returns an error if the context is cancelled or ffmpeg fails.
 func trackProgressFromPipe(ctx context.Context, r io.Reader, totalDuration float64, done <-chan error, tracker *progress.Tracker) error {
 	var (
 		percent float64
@@ -196,7 +218,7 @@ func trackProgressFromPipe(ctx context.Context, r io.Reader, totalDuration float
 			if err != nil {
 				return fmt.Errorf("ffmpeg error: %w", err)
 			}
-			// При успешном завершении гарантируем 100%
+			// On successful completion ensure 100% is shown
 			mu.Lock()
 			if percent < 100 && tracker != nil {
 				tracker.SetPct(100)
@@ -204,8 +226,8 @@ func trackProgressFromPipe(ctx context.Context, r io.Reader, totalDuration float
 			mu.Unlock()
 			return nil
 		case <-ticker.C:
-			// тик используется только для проверки контекста/завершения,
-			// обновление прогресса происходит в горутине
+			// ticker is used only to check context/completion,
+			// progress updates happen in the goroutine
 		}
 	}
 }

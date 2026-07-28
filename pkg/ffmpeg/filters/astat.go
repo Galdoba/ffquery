@@ -30,10 +30,10 @@ const (
 	MinLevel          AstatMeasure = "Min_level"           // minimal sample level
 	NoiseFloor        AstatMeasure = "Noise_floor"         // minimum local peak measured in dBFS over a short window
 	NoiseFloorCount   AstatMeasure = "Noise_floor_count"   // number of occasions (not the number of samples) that the signal attained Noise floor
-	NumberOfInfs      AstatMeasure = "Number_of_Infs"      // number of samples with an infinite value
-	NumberOfNaNs      AstatMeasure = "Number_of_NaNs"      // number of samples with a NaN (not a number) value
-	NumberOfDenormals AstatMeasure = "Number_of_denormals" // number of samples with a subnormal value
-	NumberOfSamples   AstatMeasure = "Number_of_samples"   // number of samples
+	NumberOfInfs      AstatMeasure = "Number of Infs"      // number of samples with an infinite value
+	NumberOfNaNs      AstatMeasure = "Number of NaNs"      // number of samples with a NaN (not a number) value
+	NumberOfDenormals AstatMeasure = "Number of denormals" // number of samples with a subnormal value
+	NumberOfSamples   AstatMeasure = "Number of samples"   // number of samples
 	PeakCount         AstatMeasure = "Peak_count"          // number of occasions (not the number of samples) that the signal attained either Min_level or Max_level
 	AbsPeakCount      AstatMeasure = "Abs_Peak_count"      // number of occasions that the absolute samples taken from the signal attained max absolute value of Min_level and Max_level
 	PeakLevel         AstatMeasure = "Peak_level"          // standard peak level measured in dBFS
@@ -60,9 +60,9 @@ var allowedPerChannelMeasures = map[string]bool{
 	"Min_level":           true,
 	"Noise_floor":         true,
 	"Noise_floor_count":   true,
-	"Number_of_Infs":      true,
-	"Number_of_NaNs":      true,
-	"Number_of_denormals": true,
+	"Number of Infs":      true,
+	"Number of NaNs":      true,
+	"Number of denormals": true,
 	"Peak_count":          true,
 	"Abs_Peak_count":      true,
 	"Peak_level":          true,
@@ -87,10 +87,10 @@ var allowedOverallMeasures = map[string]bool{
 	"Min_level":           true,
 	"Noise_floor":         true,
 	"Noise_floor_count":   true,
-	"Number_of_Infs":      true,
-	"Number_of_NaNs":      true,
-	"Number_of_denormals": true,
-	"Number_of_samples":   true,
+	"Number of Infs":      true,
+	"Number of NaNs":      true,
+	"Number of denormals": true,
+	"Number of samples":   true,
 	"Peak_count":          true,
 	"Abs_Peak_count":      true,
 	"Peak_level":          true,

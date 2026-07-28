@@ -17,6 +17,10 @@ func (s Stream) FPS() float64 {
 	return parseFraction(s.RFrameRate)
 }
 
+func (s Stream) FPSNumDen() (int, int) {
+	return parseNumDen(s.RFrameRate)
+}
+
 func (s Stream) Bitrate() float64 {
 	if s.BitRate == "" {
 		return 0
@@ -254,6 +258,22 @@ func parseFraction(s string) float64 {
 		return f
 	}
 	return 0
+}
+
+func parseNumDen(s string) (int, int) {
+	if s == "" {
+		return 0, 0
+	}
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) == 2 {
+		num, err1 := strconv.ParseFloat(parts[0], 64)
+		den, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 == nil && err2 == nil && den != 0 {
+			return int(num), int(den)
+		}
+	}
+
+	return 0, 0
 }
 
 func parseRatio(s string) (float64, float64) {

@@ -722,3 +722,69 @@ func dispsitionToString(disp map[string]int) string {
 	}
 	return s.String()
 }
+
+// GetVideo returns the single video stream.
+// An error is returned if there is not exactly one video stream.
+func (rd RawData) GetVideo() (Stream, error) {
+	streams := rd.getStreamsByType(StreamTypeVideo)
+	if len(streams) == 0 {
+		return Stream{}, fmt.Errorf("no video stream found")
+	}
+	if len(streams) > 1 {
+		return Stream{}, fmt.Errorf("multiple video streams found: %d", len(streams))
+	}
+	return streams[0], nil
+}
+
+// GetAudio returns the single audio stream.
+// An error is returned if there is not exactly one audio stream.
+func (rd RawData) GetAudio() (Stream, error) {
+	streams := rd.getStreamsByType(StreamTypeAudio)
+	if len(streams) == 0 {
+		return Stream{}, fmt.Errorf("no audio stream found")
+	}
+	if len(streams) > 1 {
+		return Stream{}, fmt.Errorf("multiple audio streams found: %d", len(streams))
+	}
+	return streams[0], nil
+}
+
+// GetSubtitles returns the single subtitle stream.
+// An error is returned if there is not exactly one subtitle stream.
+func (rd RawData) GetSubtitles() (Stream, error) {
+	streams := rd.getStreamsByType(StreamTypeSubtitle)
+	if len(streams) == 0 {
+		return Stream{}, fmt.Errorf("no subtitle stream found")
+	}
+	if len(streams) > 1 {
+		return Stream{}, fmt.Errorf("multiple subtitle streams found: %d", len(streams))
+	}
+	return streams[0], nil
+}
+
+// GetStreams returns all streams of the given codec type.
+// Valid types: "video", "audio", "subtitle", "data".
+// An error is returned for unsupported types.
+func (rd RawData) GetStreams(codecType string) ([]Stream, error) {
+	switch codecType {
+	case StreamTypeVideo, StreamTypeAudio, StreamTypeSubtitle, StreamTypeData:
+		streams := rd.getStreamsByType(codecType)
+		if len(streams) < 1 {
+			return nil, fmt.Errorf("no streams with codec type %q", codecType)
+		}
+		return streams, nil
+	default:
+		return nil, fmt.Errorf("unsupported codec type: %q", codecType)
+	}
+}
+
+// getStreamsByType filters the Streams slice by CodecType.
+func (rd RawData) getStreamsByType(codecType string) []Stream {
+	var streams []Stream
+	for _, s := range rd.Streams {
+		if s.CodecType == codecType {
+			streams = append(streams, s)
+		}
+	}
+	return streams
+}

@@ -21,20 +21,20 @@ var MeasurmentsCombined = &cli.StringFlag{
 var MeasurmentsPerChannel = &cli.StringFlag{
 	Name:        FlagMeasurmentsPerchannel,
 	Category:    "",
-	DefaultText: `"RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Entropy,Max_difference"`,
+	DefaultText: `"RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Max_difference"`,
 	HideDefault: false,
 	Aliases:     []string{"mp"},
 	Usage:       "set measurements applied to per_channel metrics",
-	Value:       `RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Entropy,Max_difference`,
+	Value:       `RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Max_difference`,
 }
 var MeasurmentsOverall = &cli.StringFlag{
 	Name:        FlagMeasurmentsOverall,
 	Category:    "",
-	DefaultText: `"RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Entropy,Max_difference"`,
+	DefaultText: `"RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Max_difference"`,
 	HideDefault: false,
 	Aliases:     []string{"mo"},
 	Usage:       "set measurements applied to overall metrics",
-	Value:       "RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Entropy,Max_difference",
+	Value:       "RMS_level,Min_level,Max_level,DC_offset,Noise_floor,Max_difference",
 }
 
 // string(filters.RMSLevel),

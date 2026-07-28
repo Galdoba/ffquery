@@ -8,7 +8,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,13 +16,13 @@ import (
 )
 
 const (
-	astatsFileMarker         = ".AstatsData.Stream"
-	astatsFilenameExpression = astatsFileMarker + `_(\d)\.txt$`
-	astatsLineMarker         = "lavfi.astats."
-	astatsLineExpression     = `^` + astatsLineMarker + `(\d+|Overall)\.(\w+)=(.+)$`
-	frameExpression          = `frame:(\d+)`
-	frameFactor              = 0.1
-	ffmpegSilenceValue       = -750.0
+	astatsFileMarker     = ".AstatsData.Stream"
+	astatsLineMarker     = "lavfi.astats."
+	astatsLineExpression = `^lavfi\.astats(?:\.(\d+|Overall))?\.([^=]+)=(.+)$`
+
+	frameExpression    = `frame:(\d+)`
+	FrameFactor        = 0.1
+	ffmpegSilenceValue = -750.0
 )
 
 var (
@@ -46,28 +45,13 @@ func (lm *LoudnessMap) appendData(streamIdx, metricKey string, value float64) {
 	lm.Data[streamIdx][metricKey] = append(lm.Data[streamIdx][metricKey], value)
 }
 
-func NewAstatFileSuffix(streamIndex int) string {
-	return fmt.Sprintf("%s_%d.txt", astatsFileMarker, streamIndex)
-}
-
-func extractStreamIndexFromPath(path string) (string, error) {
-	base := filepath.Base(path)
-	re := regexp.MustCompile(astatsFilenameExpression)
-	match := re.FindStringSubmatch(base)
-	if match == nil {
-		return "", fmt.Errorf("filename %q does not match expected pattern %q", base, astatsFilenameExpression)
-	}
-	return match[1], nil
-}
-
 // parseStream reads ASTATS lines and populates the LoudnessMap.
-// primaryKey is the stream index.
+// primaryKey is the stream identifier (e.g., "0_total", "0_speech").
 func parseStream(scanner *bufio.Scanner, primaryKey string, dataRe *regexp.Regexp, lm *LoudnessMap) error {
 	var currentFrame int = -1
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, astatsLineMarker) {
-			// metric line
 			channel, dataType, val, err := parseAstatLine(line, dataRe)
 			if err != nil {
 				return err
@@ -76,7 +60,6 @@ func parseStream(scanner *bufio.Scanner, primaryKey string, dataRe *regexp.Regex
 			lm.appendData(primaryKey, metricKey, val)
 			continue
 		}
-		// frame line expected
 		frame, err := extractFrameNumber(line)
 		if err != nil {
 			return fmt.Errorf("expected frame line, got: %q", line)
@@ -91,8 +74,16 @@ func parseStream(scanner *bufio.Scanner, primaryKey string, dataRe *regexp.Regex
 
 func parseAstatLine(line string, re *regexp.Regexp) (channel, dataType string, value float64, err error) {
 	parts := re.FindStringSubmatch(line)
-	if parts == nil || len(parts) != 4 {
+	if parts == nil {
 		return "", "", 0, fmt.Errorf("%w: %q", ErrInvalidLineFormat, line)
+	}
+	// parts[1] – channel number or "Overall"
+	// parts[2] – measure name
+	// parts[3] – value
+	if len(parts) == 3 {
+		// Older pattern without explicit channel, treat as Overall
+		parts = append(parts, parts[2])
+		parts[2] = "Overall"
 	}
 	val, err := parseValue(parts[3])
 	if err != nil {
@@ -123,7 +114,6 @@ func extractFrameNumber(line string) (int, error) {
 	return strconv.Atoi(matches[1])
 }
 
-// ParseAstatStreams reads ASTATS data from a set of named readers.
 // Merge safely integrates data from another LoudnessMap.
 // It assumes stream indices are disjoint across different calls.
 func (lm *LoudnessMap) Merge(other *LoudnessMap) {
@@ -153,7 +143,6 @@ func ParseAstatStreams(streams map[string]io.Reader) (*LoudnessMap, error) {
 		go func(idx string, reader io.Reader) {
 			defer wg.Done()
 
-			// each goroutine builds its own map to avoid contention
 			lm := NewLoudnessMap()
 			scanner := bufio.NewScanner(reader)
 			if err := parseStream(scanner, idx, dataRe, lm); err != nil {
@@ -163,7 +152,6 @@ func ParseAstatStreams(streams map[string]io.Reader) (*LoudnessMap, error) {
 				return
 			}
 
-			// merge the local result into the global map under lock
 			mu.Lock()
 			finalLM.Merge(lm)
 			mu.Unlock()
@@ -245,7 +233,7 @@ func writeCSVHeader(w *csv.Writer, columns []csvColumn) error {
 
 func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 	for frameIdx := range totalFrames {
-		timeSec := float64(frameIdx) * frameFactor
+		timeSec := float64(frameIdx) * FrameFactor
 		record := []string{
 			strconv.Itoa(frameIdx),
 			strconv.FormatFloat(timeSec, 'f', 3, 64),
@@ -268,10 +256,11 @@ func writeCSVRows(w *csv.Writer, columns []csvColumn, totalFrames int) error {
 	return nil
 }
 
-// CSV reading helpers (unchanged, but included for completeness)
+// --- CSV reading helpers (updated for new stream key format) ---
+
 type columnMapping struct {
-	streamIdx string
-	metricKey string
+	streamIdx string // e.g. "0_total" or "0"
+	metricKey string // e.g. "RMS_level"
 }
 
 func LoudnessMapFromCSV(csvPath string) (*LoudnessMap, error) {
@@ -310,21 +299,68 @@ func LoudnessMapFromCSV(csvPath string) (*LoudnessMap, error) {
 	return lm, nil
 }
 
+// func parseCSVHeader(header []string) ([]columnMapping, error) {
+// 	if len(header) < 2 || header[0] != "frame" || header[1] != "time" {
+// 		return nil, fmt.Errorf("invalid CSV header: expected 'frame','time', got %v", header)
+// 	}
+
+// 	cols := make([]columnMapping, 0, len(header)-2)
+// 	for i := 2; i < len(header); i++ {
+// 		colName := header[i]
+// 		if !strings.HasPrefix(colName, "stream_") {
+// 			return nil, fmt.Errorf("invalid column name %q: expected 'stream_...'", colName)
+// 		}
+// 		rest := strings.TrimPrefix(colName, "stream_")
+// 		// streamIdx may contain underscores (e.g., "0_total"), metricKey is the last component after the final underscore
+// 		lastIdx := strings.LastIndex(rest, "_")
+// 		if lastIdx == -1 {
+// 			return nil, fmt.Errorf("invalid column name %q: missing metric key", colName)
+// 		}
+// 		streamIdx := rest[:lastIdx]
+// 		metricKey := rest[lastIdx+1:]
+// 		cols = append(cols, columnMapping{
+// 			streamIdx: streamIdx,
+// 			metricKey: metricKey,
+// 		})
+// 	}
+// 	return cols, nil
+// }
+
 func parseCSVHeader(header []string) ([]columnMapping, error) {
 	if len(header) < 2 || header[0] != "frame" || header[1] != "time" {
 		return nil, fmt.Errorf("invalid CSV header: expected 'frame','time', got %v", header)
 	}
 
+	// Регулярное выражение для столбцов вида stream_<streamId>_<channel>.<metric>
+	// streamId может содержать подчёркивания (например, "0_speech")
+	// channel – число или "Overall"
+	// metric – имя метрики (может содержать подчёркивания, например "RMS_level")
+	colRe := regexp.MustCompile(`^stream_(\d+_(?:speech|total))_(\d+|Overall)\.(.+)$`)
+
 	cols := make([]columnMapping, 0, len(header)-2)
 	for i := 2; i < len(header); i++ {
 		colName := header[i]
-		parts := strings.SplitN(colName, "_", 3)
-		if len(parts) != 3 || parts[0] != "stream" {
-			return nil, fmt.Errorf("invalid column name %q: expected 'stream_<idx>_<metricKey>'", colName)
+		matches := colRe.FindStringSubmatch(colName)
+		if matches == nil {
+			// Попробуем старый формат (без speech/total) для обратной совместимости
+			// stream_<idx>_<channel>.<metric>
+			oldRe := regexp.MustCompile(`^stream_(\d+)_(\d+|Overall)\.(.+)$`)
+			oldMatches := oldRe.FindStringSubmatch(colName)
+			if oldMatches != nil {
+				cols = append(cols, columnMapping{
+					streamIdx: oldMatches[1],
+					metricKey: oldMatches[2] + "." + oldMatches[3],
+				})
+				continue
+			}
+			return nil, fmt.Errorf("invalid column name %q: expected 'stream_<streamId>_<channel>.<metric>'", colName)
 		}
+		streamIdx := matches[1] // например, "0_speech"
+		channel := matches[2]   // например, "2"
+		metric := matches[3]    // например, "DC_offset"
 		cols = append(cols, columnMapping{
-			streamIdx: parts[1],
-			metricKey: parts[2],
+			streamIdx: streamIdx,
+			metricKey: channel + "." + metric,
 		})
 	}
 	return cols, nil

@@ -42,39 +42,39 @@ func ScanAstats() *cli.Command {
 }
 
 var per_channel_metrics = []filters.AstatMeasure{
-	filters.RMSLevel,
-	filters.RMSPeak,
-	filters.RMSTrough,
-	filters.RMSDifference,
-	filters.MinLevel,
-	filters.PeakLevel,
-	filters.NoiseFloor,
-	filters.NoiseFloorCount,
-	filters.DCOffset,
-	filters.Entropy,
-	filters.FlatFactor,
-	filters.MaxDifference,
-	filters.MeanDifference,
-	filters.ZeroCrossings,
-	filters.ZeroCrossingsRate,
-	filters.BitDepth,
+	// filters.RMSLevel,
+	// filters.RMSPeak,
+	// filters.RMSTrough,
+	// filters.RMSDifference,
+	// filters.MinLevel,
+	// filters.PeakLevel,
+	// filters.NoiseFloor,
+	// filters.NoiseFloorCount,
+	// filters.DCOffset,
+	// filters.Entropy,
+	// filters.FlatFactor,
+	// filters.MaxDifference,
+	// filters.MeanDifference,
+	// filters.ZeroCrossings,
+	// filters.ZeroCrossingsRate,
+	// filters.BitDepth,
 }
 
 var overall_metrics = []filters.AstatMeasure{
-	filters.RMSLevel,
-	filters.RMSPeak,
-	filters.RMSTrough,
-	filters.RMSDifference,
-	filters.MinLevel,
-	filters.PeakLevel,
-	filters.NoiseFloor,
-	filters.NoiseFloorCount,
-	filters.DCOffset,
-	filters.Entropy,
-	filters.FlatFactor,
-	filters.MaxDifference,
-	filters.MeanDifference,
-	filters.BitDepth,
+	// filters.RMSLevel,
+	// filters.RMSPeak,
+	// filters.RMSTrough,
+	// filters.RMSDifference,
+	// filters.MinLevel,
+	// filters.PeakLevel,
+	// filters.NoiseFloor,
+	// filters.NoiseFloorCount,
+	// filters.DCOffset,
+	// filters.Entropy,
+	// filters.FlatFactor,
+	// filters.MaxDifference,
+	// filters.MeanDifference,
+	// filters.BitDepth,
 }
 
 func scanAstatsAction() cli.ActionFunc {
@@ -103,7 +103,6 @@ func scanAstatsAction() cli.ActionFunc {
 				overallMeasurments = append(overallMeasurments, filters.AstatMeasure(s))
 			}
 		}
-
 		for _, m := range mg.MediaFiles {
 			logger.Info("start scan", "file", m.Path)
 			if err := m.ScanAstats(context.Background(),
@@ -119,6 +118,11 @@ func scanAstatsAction() cli.ActionFunc {
 				continue
 			}
 			logger.Error("scan completed", "result file", m.Meta["astatsCSV"])
+			sg, err := mediagroup.DetectSpeechSegments(m.Meta["astatsCSV"], mediagroup.DefaultVADConfig())
+			fmt.Println(err)
+			for _, s := range sg {
+				fmt.Println(s)
+			}
 		}
 		if len(errs) > 0 {
 			return errorReport(errs...)

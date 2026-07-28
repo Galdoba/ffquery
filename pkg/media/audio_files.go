@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +17,7 @@ import (
 	"github.com/Galdoba/ffquery/pkg/media/streammap"
 )
 
-// generateFileCommand builds an ffmpeg command that writes astats metadata to files.
+// generateFileCommand builds an ffmpeg command that writes total and speech astats metadata to files.
 func (scan *scanConfig) generateFileCommand() error {
 	var filterParts []string
 	var mapArgs []string
@@ -26,10 +25,15 @@ func (scan *scanConfig) generateFileCommand() error {
 
 	for _, s := range scan.Streams {
 		streamKey := fmt.Sprintf("%d", s.Index)
-		fileName := scan.Prefix + streammap.NewAstatFileSuffix(s.Index)
-		filePath := filepath.Join(scan.Dir, fileName)
-		slashed := filepath.ToSlash(filePath)
-		outputPaths[streamKey] = slashed
+
+		totalFile := astatDataFilePath(scan.Dir, scan.Prefix, s.Index, "total")
+		speechFile := astatDataFilePath(scan.Dir, scan.Prefix, s.Index, "speech")
+
+		slashedTotal := filepath.ToSlash(totalFile)
+		slashedSpeech := filepath.ToSlash(speechFile)
+
+		outputPaths[streamKey+"_total"] = slashedTotal
+		outputPaths[streamKey+"_speech"] = slashedSpeech
 
 		astat, err := filters.NewAstat(
 			filters.AstatMetadata(true),
@@ -41,11 +45,24 @@ func (scan *scanConfig) generateFileCommand() error {
 			return fmt.Errorf("creating astat filter for stream %d: %w", s.Index, err)
 		}
 
-		streamTag := fmt.Sprintf("stream_%d", s.Index)
+		tagAll := fmt.Sprintf("all_%d", s.Index)
+		tagSpeech := fmt.Sprintf("speech_%d", s.Index)
+		tagTotalOut := fmt.Sprintf("total_out_%d", s.Index)
+		tagSpeechOut := fmt.Sprintf("speech_out_%d", s.Index)
+
+		// asplit + total chain + speech chain
 		filterParts = append(filterParts,
-			fmt.Sprintf("[0:a:%d]asetnsamples=%d,%s,ametadata=mode=4:file='%s'[%s]",
-				s.Index, s.IntervalSamples, astat.String(), slashed, streamTag))
-		mapArgs = append(mapArgs, "-map", fmt.Sprintf("[%s]", streamTag))
+			fmt.Sprintf("[0:a:%d]asplit=2[%s][%s]", s.Index, tagAll, tagSpeech),
+			fmt.Sprintf("[%s]asetnsamples=%d,%s,ametadata=mode=4:file='%s'[%s]",
+				tagAll, s.IntervalSamples, astat.String(), slashedTotal, tagTotalOut),
+			fmt.Sprintf("[%s]bandpass=f=300:w=3400,asetnsamples=%d,%s,ametadata=mode=4:file='%s'[%s]",
+				tagSpeech, s.IntervalSamples, astat.String(), slashedSpeech, tagSpeechOut),
+		)
+
+		mapArgs = append(mapArgs,
+			"-map", fmt.Sprintf("[%s]", tagTotalOut),
+			"-map", fmt.Sprintf("[%s]", tagSpeechOut),
+		)
 	}
 
 	progressPath := filepath.Join(scan.Dir, scan.Prefix+".progress")
@@ -121,9 +138,7 @@ func (m *Media) parseAstatFiles(paths map[string]string) (*streammap.LoudnessMap
 		if key == progressFileKey || key == csvFileKey {
 			continue
 		}
-		if _, err := strconv.Atoi(key); err != nil {
-			continue
-		}
+		// Все оставшиеся ключи — валидные astats-файлы (например, "0_total", "0_speech")
 		f, err := os.Open(path)
 		if err != nil {
 			for _, c := range closers {
@@ -139,7 +154,6 @@ func (m *Media) parseAstatFiles(paths map[string]string) (*streammap.LoudnessMap
 			c.Close()
 		}
 	}()
-	// fmt.Println("go to streammap")
 	return streammap.ParseAstatStreams(readers)
 }
 
@@ -205,4 +219,9 @@ func (m *Media) cleanupTempFiles(paths map[string]string, csvPath string) {
 			fmt.Fprintf(os.Stderr, "failed to remove %s: %v\n", path, err)
 		}
 	}
+}
+
+// astatDataFilePath builds a path for a temporary astats file with the given variant (e.g., "total", "speech").
+func astatDataFilePath(dir, prefix string, streamIdx int, variant string) string {
+	return filepath.Join(dir, fmt.Sprintf("%s.AstatsData.Stream_%d.%s.txt", prefix, streamIdx, variant))
 }
