@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters"
+	"github.com/Galdoba/ffquery/pkg/ffmpeg/filters/audio/astats"
 	"github.com/Galdoba/ffquery/pkg/ffprobe"
 	"github.com/Galdoba/ffquery/pkg/media/streammap"
 	"github.com/Galdoba/ffquery/pkg/progress"
@@ -45,8 +46,8 @@ type audioScanOutputs struct {
 
 type scanConfig struct {
 	Streams         []AudioStreamInfo
-	PerChannel      []filters.AstatMeasure
-	Overall         []filters.AstatMeasure
+	PerChannel      []astats.Measure
+	Overall         []astats.Measure
 	Dir             string
 	Prefix          string
 	CSVPath         string
@@ -58,14 +59,14 @@ type scanConfig struct {
 
 type ScanOption func(*scanConfig) error
 
-func WithPerChannelMeasures(measures ...filters.AstatMeasure) ScanOption {
+func WithPerChannelMeasures(measures ...astats.Measure) ScanOption {
 	return func(scan *scanConfig) error {
 		scan.PerChannel = measures
 		return nil
 	}
 }
 
-func WithOverallMeasures(measures ...filters.AstatMeasure) ScanOption {
+func WithOverallMeasures(measures ...astats.Measure) ScanOption {
 	return func(scan *scanConfig) error {
 		scan.Overall = measures
 		return nil

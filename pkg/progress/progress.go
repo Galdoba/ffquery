@@ -864,3 +864,11 @@ func (t *Tracker) Close() {
 		}
 	}
 }
+
+// SetTotal updates the total number of steps. Values <= 0 indicate indeterminate progress.
+// Safe for concurrent use.
+func (t *Tracker) SetTotal(total int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.totalSteps = total
+}

@@ -725,15 +725,15 @@ func dispsitionToString(disp map[string]int) string {
 
 // GetVideo returns the single video stream.
 // An error is returned if there is not exactly one video stream.
-func (rd RawData) GetVideo() (Stream, error) {
+func (rd RawData) GetVideo() (*Stream, error) {
 	streams := rd.getStreamsByType(StreamTypeVideo)
 	if len(streams) == 0 {
-		return Stream{}, fmt.Errorf("no video stream found")
+		return nil, fmt.Errorf("no video stream found")
 	}
 	if len(streams) > 1 {
-		return Stream{}, fmt.Errorf("multiple video streams found: %d", len(streams))
+		return nil, fmt.Errorf("multiple video streams found: %d", len(streams))
 	}
-	return streams[0], nil
+	return &streams[0], nil
 }
 
 // GetAudio returns the single audio stream.

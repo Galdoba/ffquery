@@ -1,6 +1,7 @@
 package yframe_test
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -10,9 +11,10 @@ import (
 )
 
 func TestScanVideo(t *testing.T) {
-	videoPath := `\\192.168.31.4\root\EDIT\@trailers_temp\Adskiy_ray_s01_TRL_HD.mp4`
+	videoPath := `\\192.168.31.4\root\EDIT\@trailers_temp\28_dney_TRL_HD.mp4`
 	outPath := videoPath + ".yblk"
-	cfg := blocksize.ConfigExactGridSize(16)
+	hmPath := videoPath + ".yblk.mp4"
+	cfg := blocksize.ConfigBalanced()
 	err := yframe.ScanToFile(videoPath, cfg, outPath)
 	if err != nil {
 		t.Fatal(err)
@@ -36,4 +38,8 @@ func TestScanVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("Frame 0: %v", frame0)
+	fmt.Println("generating heatmap")
+	if err := yframe.GenerateHeatmapVideo(outPath, hmPath); err != nil {
+		fmt.Println(err)
+	}
 }
